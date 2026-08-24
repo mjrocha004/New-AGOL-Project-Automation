@@ -1,0 +1,10 @@
+# Normalize line endings. This repo is edited on both macOS and Windows; without
+# this, every snapshot and YAML file churns its entire diff on the first commit
+# from the other platform, which would destroy the value of the snapshots as
+# reviewable template history.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gdb binary
+*.zip binary

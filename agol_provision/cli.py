@@ -40,23 +40,181 @@ def main() -> None:
 @main.command("setup-profile")
 @click.option("--name", required=True, help="Local profile name, e.g. vsclr.")
 @click.option("--org", required=True, help="https://yourorg.maps.arcgis.com")
-@click.option("--username", required=True, help="AGOL username.")
-def setup_profile(name: str, org: str, username: str) -> None:
+@click.option("--username", help="AGOL username. Use for built-in ArcGIS accounts.")
+@click.option("--client-id", help="OAuth app client id. Use for SSO / enterprise logins.")
+def setup_profile(name: str, org: str, username: str | None, client_id: str | None) -> None:
     """Store AGOL credentials in a local profile.
 
-    The password is read from an interactive prompt and handed to the ArcGIS API,
-    which stores it in the operating system keyring. It is never written to this
-    repository, and never appears in shell history or command output.
+    Two sign-in paths, depending on how your organization authenticates:
+
+    \b
+      --username    Built-in ArcGIS account. Prompts for a password, which is
+                    handed to the ArcGIS API and stored in the OS keyring.
+      --client-id   SSO / SAML / enterprise login. Opens a browser to sign in and
+                    asks for the resulting authorization code. SAML accounts
+                    cannot accept a password directly, so this is the only path
+                    that works for them.
+
+    Either way, nothing is written to this repository, shell history, or command
+    output.
     """
     from arcgis.gis import GIS
 
-    password = click.prompt("AGOL password", hide_input=True)
+    if bool(username) == bool(client_id):
+        _fail(
+            "Pass exactly one of --username (built-in account) or --client-id (SSO).\n"
+            "If sign-in normally sends you to your company's login page, you need "
+            "--client-id.\n"
+            "Register an OAuth app in AGOL: Content > New item > Application > Other "
+            "application, then copy its Client ID."
+        )
+
     try:
-        gis = GIS(url=org, username=username, password=password, profile=name)
+        if client_id:
+            console.print("A browser window will open. Sign in, then paste the code here.")
+            gis = GIS(url=org, client_id=client_id, profile=name)
+        else:
+            password = click.prompt("AGOL password", hide_input=True)
+            gis = GIS(url=org, username=username, password=password, profile=name)
     except Exception as exc:
-        _fail(f"Could not sign in: {exc}")
+        _fail(
+            f"Could not sign in: {exc}\n\n"
+            "If your organization uses single sign-on, a username and password will "
+            "not work -- re-run with --client-id instead."
+        )
+
     console.print(f"[green]Saved profile[/green] {name!r} for {gis.users.me.username}.")
     console.print("Credentials are in the OS keyring, not in this repo.")
+    console.print("Verify the machine is ready with: [cyan]agol-provision doctor "
+                  f"--profile {name}[/cyan]")
+
+
+# ---------------------------------------------------------------- environment
+
+
+@main.command()
+@click.option("--profile", help="Profile to test, or 'pro' for the ArcGIS Pro "
+                                "connection. Omit to check the install only.")
+def doctor(profile: str | None) -> None:
+    """Check that this machine can run the tool.
+
+    Verifies the Python and ArcGIS API versions, that the OS keyring actually
+    stores secrets, and -- with --profile -- that the profile connects and the
+    account holds the privileges provisioning needs. Intended for a freshly set-up
+    machine, where the failures are environmental rather than in the code.
+    """
+    import platform
+    import sys
+
+    ok = True
+
+    def check(label: str, passed: bool, detail: str = "") -> None:
+        """A requirement. Failing one means this machine cannot run the tool."""
+        nonlocal ok
+        mark = "[green]PASS[/green]" if passed else "[red]FAIL[/red]"
+        console.print(f"  {mark}  {label}" + (f"  [dim]{detail}[/dim]" if detail else ""))
+        ok = ok and passed
+
+    def note(label: str, available: bool, detail: str = "") -> None:
+        """An option, not a requirement. Two sign-in paths exist and either is
+        sufficient, so an unavailable one is information rather than a failure."""
+        mark = "[green] yes[/green]" if available else "[dim]  no[/dim]"
+        console.print(f"  {mark}  {label}" + (f"  [dim]{detail}[/dim]" if detail else ""))
+
+    console.print(f"[bold]Platform[/bold]  {platform.system()} {platform.release()} "
+                  f"({platform.machine()})")
+    console.print()
+
+    console.print("[bold]Install[/bold]")
+    py = sys.version_info
+    check("Python 3.11 or 3.12", (3, 11) <= (py.major, py.minor) < (3, 13),
+          f"{py.major}.{py.minor}.{py.micro}")
+
+    try:
+        import arcgis
+
+        from agol_provision.auth import MIN_ARCGIS_VERSION, check_arcgis_version
+
+        problem = check_arcgis_version(strict=False)
+        want = ".".join(str(n) for n in MIN_ARCGIS_VERSION)
+        check(f"arcgis >= {want}", problem is None, arcgis.__version__)
+        if problem:
+            console.print(f"        [yellow]{problem}[/yellow]")
+    except ImportError as exc:
+        check("arcgis importable", False, str(exc))
+
+    from agol_provision.auth import arcpy_available, uses_arcgis_pro
+
+    pro_mode = bool(profile) and uses_arcgis_pro(profile)
+    has_arcpy = arcpy_available()
+
+    console.print()
+    console.print("[bold]Sign-in options available here[/bold]")
+    if pro_mode:
+        # Requested explicitly, so now it is a requirement rather than an option.
+        check("--profile pro (borrows ArcGIS Pro's connection)", has_arcpy,
+              "arcpy present" if has_arcpy else "arcpy not importable")
+        if not has_arcpy:
+            console.print("        [yellow]Run from a clone of ArcGIS Pro's conda "
+                          "environment, or use a stored profile instead.[/yellow]")
+    else:
+        note("--profile pro (borrows ArcGIS Pro's connection)", has_arcpy,
+             "arcpy present" if has_arcpy else "needs ArcGIS Pro's Python environment")
+
+    # A stored profile keeps its password in the OS keyring. The Pro connection
+    # stores nothing, so this only matters when a stored profile is in play.
+    if not pro_mode:
+        try:
+            import keyring
+
+            backend = type(keyring.get_keyring()).__name__
+            # A backend can be present and still not persist anything -- a no-op
+            # backend registers itself when no real one is available. Round-tripping
+            # a dummy value is the only way to know it works.
+            keyring.set_password("agol-provision-doctor", "test", "ok")
+            stored = keyring.get_password("agol-provision-doctor", "test")
+            if profile:
+                check("keyring stores and returns a secret", stored == "ok", backend)
+            else:
+                note("stored profile (keyring holds the password)", stored == "ok", backend)
+            try:
+                keyring.delete_password("agol-provision-doctor", "test")
+            except Exception:
+                pass
+        except Exception as exc:
+            check("keyring usable", False, str(exc))
+            console.print("        [yellow]Without a keyring the ArcGIS API cannot store "
+                          "a profile password securely. --profile pro avoids the "
+                          "question entirely.[/yellow]")
+
+    if not profile:
+        console.print()
+        console.print("[dim]Pass --profile NAME to also test the AGOL connection.[/dim]")
+        sys.exit(0 if ok else 1)
+
+    console.print()
+    label = "ArcGIS Pro connection" if pro_mode else f"Profile {profile}"
+    console.print(f"[bold]{label}[/bold]")
+    from agol_provision.auth import AuthError, check_privileges, connect, describe
+
+    try:
+        gis = connect(profile)
+        check("connects to ArcGIS Online", True, describe(gis))
+    except AuthError as exc:
+        check("connects to ArcGIS Online", False, str(exc).splitlines()[0])
+        sys.exit(1)
+
+    missing = check_privileges(gis, strict=False)
+    check("account can create items, groups, views, and share", not missing,
+          f"missing: {', '.join(missing)}" if missing else "all present")
+
+    console.print()
+    if ok:
+        console.print("[bold green]Ready.[/bold green] Next: agol-provision discover "
+                      f"--profile {profile} --group \"Templates\"")
+    else:
+        console.print("[bold red]Not ready.[/bold red] Fix the failures above first.")
+    sys.exit(0 if ok else 1)
 
 
 # ---------------------------------------------------------------- phase 0a

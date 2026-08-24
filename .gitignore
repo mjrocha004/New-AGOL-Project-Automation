@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.env
+
+# Per-project run state contains live AGOL item IDs for real client projects.
+# Tracked deliberately? No -- keep local. Rollback needs it; git does not.
+state/*.json
+!state/.gitkeep
+
+# Credentials must never land here. Auth uses the ArcGIS profile keyring.
+*.pfx
+*.p12
+credentials*

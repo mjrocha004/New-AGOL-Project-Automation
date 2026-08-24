@@ -1,0 +1,129 @@
+# Example manifest: the shape `agol-provision discover` will generate.
+#
+# The item ids below are placeholders. Run discovery against the real org to get
+# a manifest with actual ids and a dependency graph derived from the templates
+# themselves, then edit that file rather than this one.
+#
+# Patterns:
+#   {base}     display stem  -> "CompanyA Moline"
+#   {base_sn}  service stem  -> "CompanyA_Moline"
+
+name: example
+version: 1
+source_org: https://example.maps.arcgis.com
+
+master:
+  key: master
+  template_item_id: "00000000000000000000000000000001"
+  title: "{base}"
+  service_name: "{base_sn}"
+
+views:
+  - key: design
+    template_item_id: "00000000000000000000000000000002"
+    title: "{base} - Design View"
+    service_name: "{base_sn}_Design"
+  - key: redline
+    template_item_id: "00000000000000000000000000000003"
+    title: "{base} - Contractor / CX Redline View"
+    service_name: "{base_sn}_Redline"
+  - key: verified
+    template_item_id: "00000000000000000000000000000004"
+    title: "{base} - Verified Construction View"
+    service_name: "{base_sn}_Verified"
+  - key: qc
+    template_item_id: "00000000000000000000000000000005"
+    title: "{base} - QC View"
+    service_name: "{base_sn}_QC"
+  - key: testing
+    template_item_id: "00000000000000000000000000000006"
+    title: "{base} - Testing View"
+    service_name: "{base_sn}_Testing"
+  - key: data_manager
+    template_item_id: "00000000000000000000000000000007"
+    title: "{base} - Data Manager View"
+    service_name: "{base_sn}_DataManager"
+  - key: viewer
+    template_item_id: "00000000000000000000000000000008"
+    title: "{base} - Viewer View"
+    service_name: "{base_sn}_Viewer"
+
+# `consumes` on a group documents which views it is meant to carry and gives
+# `verify` something to check. Sharing itself is driven by each item's `share_to`.
+groups:
+  - key: contractor_group
+    title: "{base} - Contractor"
+    access: private
+    consumes: [design, redline, testing, verified]
+  - key: qc_group
+    title: "{base} - QC"
+    access: private
+    consumes: [design, qc]
+  - key: viewer_group
+    title: "{base} - Viewer"
+    access: private
+    consumes: [viewer]
+  - key: data_manager_group
+    title: "{base} - Data Manager"
+    access: private
+    consumes: [data_manager]
+
+maps:
+  - key: field_collection_map
+    template_item_id: "00000000000000000000000000000009"
+    item_type: Web Map
+    title: "{base} - Field Collection Map"
+    consumes: [design, redline]
+    share_to: [contractor_group]
+  - key: testing_map
+    template_item_id: "0000000000000000000000000000000a"
+    item_type: Web Map
+    title: "{base} - Testing Map"
+    consumes: [design, testing]
+    share_to: [contractor_group]
+  - key: qc_review_map
+    template_item_id: "0000000000000000000000000000000b"
+    item_type: Web Map
+    title: "{base} - QC Review Map"
+    consumes: [design, qc]
+    share_to: [qc_group]
+  - key: viewer_map
+    template_item_id: "0000000000000000000000000000000c"
+    item_type: Web Map
+    title: "{base} - Viewer Map"
+    consumes: [viewer]
+    share_to: [viewer_group]
+
+# The `consumes` values below are assumptions. Discovery derives the real edges by
+# scanning each app's JSON for template item ids -- trust that output over these.
+apps:
+  - key: exb_project_viewer
+    template_item_id: "0000000000000000000000000000000d"
+    item_type: Web Experience
+    title: "{base} - Project Viewer"
+    consumes: [viewer_map]
+    share_to: [viewer_group]
+  - key: exb_qc_review
+    template_item_id: "0000000000000000000000000000000e"
+    item_type: Web Experience
+    title: "{base} - QC Review"
+    consumes: [qc_review_map]
+    share_to: [qc_group]
+  - key: exb_data_management
+    template_item_id: "0000000000000000000000000000000f"
+    item_type: Web Experience
+    title: "{base} - Data Management Application"
+    consumes: [data_manager]
+    share_to: [data_manager_group]
+  - key: exb_permit_management
+    template_item_id: "00000000000000000000000000000010"
+    item_type: Web Experience
+    title: "{base} - Permit Management Application"
+    consumes: [data_manager]
+    share_to: [data_manager_group]
+  - key: dashboard_project_metrics
+    template_item_id: "00000000000000000000000000000011"
+    item_type: Dashboard
+    title: "{base} - Project Metrics"
+    consumes: [viewer_map]
+    share_to: [viewer_group, qc_group]

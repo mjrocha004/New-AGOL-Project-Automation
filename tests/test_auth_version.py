@@ -82,3 +82,31 @@ class TestProConnectionMode:
         message = str(exc.value)
         assert "ArcGIS Pro's Python environment" in message
         assert "setup-profile" in message  # names the alternative
+
+
+class TestPythonVersionGate:
+    """The floor has no ceiling on purpose: ArcGIS Pro picks the interpreter, and
+    an invented upper bound rejected Pro's own Python 3.13 for no real reason.
+    """
+
+    def test_floor_only_no_ceiling(self):
+        from agol_provision.auth import MIN_PYTHON_VERSION
+
+        assert MIN_PYTHON_VERSION == (3, 11)
+
+    def test_this_interpreter_passes(self):
+        from agol_provision.auth import check_python_version
+
+        assert check_python_version(strict=False) is None
+
+    @pytest.mark.parametrize("version", [(3, 11), (3, 12), (3, 13), (3, 14), (4, 0)])
+    def test_accepts_everything_at_or_above_the_floor(self, version):
+        from agol_provision.auth import MIN_PYTHON_VERSION
+
+        assert version >= MIN_PYTHON_VERSION
+
+    @pytest.mark.parametrize("version", [(3, 10), (3, 9), (2, 7)])
+    def test_rejects_below_the_floor(self, version):
+        from agol_provision.auth import MIN_PYTHON_VERSION
+
+        assert version < MIN_PYTHON_VERSION

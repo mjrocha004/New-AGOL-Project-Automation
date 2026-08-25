@@ -25,6 +25,12 @@ from arcgis.gis import GIS
 # Pro's bundled Python gets whichever version Pro shipped.
 MIN_ARCGIS_VERSION = (2, 4, 0)
 
+# A floor, deliberately with no ceiling. ArcGIS Pro chooses the interpreter, and
+# an upper bound guessed here would reject a Pro release for no reason -- which is
+# exactly what an invented "<3.13" did. Raise this only against a real
+# incompatibility.
+MIN_PYTHON_VERSION = (3, 11)
+
 # Provisioning creates content, groups, and views, and shares items to groups.
 # Checking up front turns a confusing mid-run 403 into a clear message.
 REQUIRED_PRIVILEGES = {
@@ -178,3 +184,20 @@ def arcpy_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def check_python_version(*, strict: bool = True) -> str | None:
+    """Return a problem description if this interpreter is too old."""
+    import sys
+
+    running = sys.version_info[:2]
+    if running >= MIN_PYTHON_VERSION:
+        return None
+
+    want = ".".join(str(n) for n in MIN_PYTHON_VERSION)
+    problem = (
+        f"Python {running[0]}.{running[1]} is running, but {want} or newer is required."
+    )
+    if strict:
+        raise AuthError(problem)
+    return problem

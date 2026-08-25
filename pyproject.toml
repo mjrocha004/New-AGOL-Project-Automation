@@ -2,7 +2,7 @@
 name = "agol-provision"
 version = "0.1.0"
 description = "Provision a complete ArcGIS Online project from templates: master feature service, views, groups, maps, and apps."
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11"
 dependencies = [
     # remap_data() requires 2.4.0+; WebExperience requires 2.2.0+
     "arcgis>=2.4.0",

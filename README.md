@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 151 tests pass, none needing network access.
+the master schema copies faithfully. 161 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.

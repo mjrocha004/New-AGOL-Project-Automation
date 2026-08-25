@@ -106,8 +106,11 @@ def doctor(profile: str) -> None:
     console.print()
 
     console.print("[bold]Install[/bold]")
+    from agol_provision.auth import MIN_PYTHON_VERSION, check_python_version
+
     py = sys.version_info
-    check("Python 3.11 or 3.12", (3, 11) <= (py.major, py.minor) < (3, 13),
+    min_py = ".".join(str(n) for n in MIN_PYTHON_VERSION)
+    check(f"Python {min_py} or newer", check_python_version(strict=False) is None,
           f"{py.major}.{py.minor}.{py.micro}")
 
     try:

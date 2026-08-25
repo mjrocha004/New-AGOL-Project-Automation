@@ -43,3 +43,48 @@ def test_spike_master_requires_an_explicit_target():
     cmd = main.commands["spike-master"]
     master = next(p for p in cmd.params if p.name == "master_id")
     assert master.required
+
+
+class TestSelectorHelpers:
+    """`discover` needs to be told which items are the templates. These commands
+    exist so that selector is discoverable rather than guessed at.
+    """
+
+    @pytest.mark.parametrize("command", ["list-groups", "list-content"])
+    def test_helper_commands_exist(self, command):
+        assert command in main.commands
+
+    @pytest.mark.parametrize("command", ["list-groups", "list-content"])
+    def test_helpers_default_to_the_pro_connection(self, command):
+        assert _profile_option(command).default == "home"
+
+    def test_list_content_requires_a_query(self):
+        """Listing the whole org by accident would be slow and useless."""
+        cmd = main.commands["list-content"]
+        assert next(p for p in cmd.params if p.name == "query").required
+
+    def test_discover_offers_a_dry_run(self):
+        cmd = main.commands["discover"]
+        dry = next(p for p in cmd.params if p.name == "dry_run")
+        assert dry.is_flag and dry.default is False
+
+    def test_all_three_selectors_are_optional_individually(self):
+        """Group, ids, and query are alternatives; collect() enforces that one is
+        given, so click must not mark any of them required."""
+        cmd = main.commands["discover"]
+        for name in ("group", "ids_file", "query"):
+            assert not next(p for p in cmd.params if p.name == name).required
+
+
+class TestReadOnlyCommands:
+    """Only spike-master writes to AGOL. Everything else in Phase 0 is read-only,
+    which is what makes it safe to iterate on a selector."""
+
+    @pytest.mark.parametrize("command", ["doctor", "list-groups", "list-content"])
+    def test_read_only_commands_need_no_confirmation(self, command):
+        cmd = main.commands[command]
+        assert not any(p.name == "yes" for p in cmd.params)
+
+    def test_spike_master_has_a_confirmation_escape_hatch(self):
+        cmd = main.commands["spike-master"]
+        assert any(p.name == "yes" for p in cmd.params)

@@ -197,6 +197,81 @@ def doctor(profile: str) -> None:
     sys.exit(0 if ok else 1)
 
 
+# ---------------------------------------------------------------- finding things
+
+
+@main.command("list-groups")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
+@click.option("--search", help="Filter by title substring.")
+def list_groups(profile: str, search: str | None) -> None:
+    """List the groups this account belongs to, with item counts.
+
+    Use it to find the value for `discover --group`. Read-only.
+    """
+    from agol_provision.auth import AuthError, connect, describe
+
+    try:
+        gis = connect(profile)
+    except AuthError as exc:
+        _fail(str(exc))
+
+    console.print(f"Connected as [cyan]{describe(gis)}[/cyan]\n")
+    groups = list(gis.users.me.groups)
+    if search:
+        needle = search.lower()
+        groups = [g for g in groups if needle in (g.title or "").lower()]
+
+    if not groups:
+        _fail("No groups matched. Try `list-content` to search by title instead.")
+
+    table = Table(title=f"Groups ({len(groups)})")
+    for col in ("Title", "Items", "Id"):
+        table.add_column(col, overflow="fold")
+    for g in sorted(groups, key=lambda g: (g.title or "").lower()):
+        try:
+            count = str(len(g.content()))
+        except Exception:
+            count = "?"
+        table.add_row(g.title, count, g.groupid)
+    console.print(table)
+    console.print("\n[dim]Then: python -m agol_provision.cli discover "
+                  "--group \"<Title>\" --dry-run[/dim]")
+
+
+@main.command("list-content")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
+@click.option("--query", required=True,
+              help='AGOL search, e.g. "title:VSCLR Template" or "owner:jsmith".')
+@click.option("--limit", default=50, show_default=True)
+def list_content(profile: str, query: str, limit: int) -> None:
+    """Search org content by title, owner, or type. Read-only.
+
+    Use it to work out a `discover --query`, or to collect item ids for
+    `discover --ids`.
+    """
+    from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.discovery import classify
+
+    try:
+        gis = connect(profile)
+    except AuthError as exc:
+        _fail(str(exc))
+
+    console.print(f"Connected as [cyan]{describe(gis)}[/cyan]\n")
+    items = list(gis.content.search(query, max_items=limit))
+    if not items:
+        _fail(f"Nothing matched {query!r}.")
+
+    table = Table(title=f"Matches ({len(items)})")
+    for col in ("Title", "Type", "Role", "Owner", "Id"):
+        table.add_column(col, overflow="fold")
+    for it in items:
+        table.add_row(it.title, it.type, classify(it), it.owner, it.itemid)
+    console.print(table)
+
+
 # ---------------------------------------------------------------- phase 0a
 
 
@@ -211,7 +286,9 @@ def doctor(profile: str) -> None:
               help="Name for the generated manifest.")
 @click.option("--out", type=click.Path(), default=None,
               help="Manifest output path. Defaults to the templates directory.")
-def discover(profile, group, ids_file, query, manifest_name, out) -> None:
+@click.option("--dry-run", is_flag=True,
+              help="Show which items matched, then stop. Writes nothing.")
+def discover(profile, group, ids_file, query, manifest_name, out, dry_run) -> None:
     """Audit the template items and generate a manifest, snapshots, and a report.
 
     Read-only: this command never writes to ArcGIS Online.
@@ -243,6 +320,26 @@ def discover(profile, group, ids_file, query, manifest_name, out) -> None:
 
     if not items:
         _fail("No template items found. Widen the search, or check sharing on the templates.")
+
+    if dry_run:
+        # Confirming the selector is cheap; inspecting every item is not. Stop here
+        # so the selector can be tuned without reading 21 items' worth of JSON.
+        table = Table(title=f"Would inspect {len(items)} item(s)")
+        for col in ("Title", "Type", "Role", "Id"):
+            table.add_column(col, overflow="fold")
+        for it in items:
+            table.add_row(it.title, it.type, discovery.classify(it), it.itemid)
+        console.print(table)
+
+        roles = [discovery.classify(i) for i in items]
+        console.print(f"\nmaster: {roles.count('master')}  views: {roles.count('view')}  "
+                      f"maps: {roles.count('map')}  apps: {roles.count('app')}  "
+                      f"unknown: {roles.count('unknown')}")
+        if roles.count("master") != 1:
+            console.print("[yellow]Expected exactly one master feature service "
+                          "(a Feature Service without the 'View Service' keyword).[/yellow]")
+        console.print("\n[dim]Looks right? Re-run without --dry-run.[/dim]")
+        return
 
     console.print(f"Inspecting {len(items)} item(s)...")
     inspected = discovery.inspect_all(gis, items)

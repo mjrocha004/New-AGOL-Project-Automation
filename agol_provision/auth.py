@@ -1,25 +1,18 @@
 """Connecting to ArcGIS Online.
 
-Credentials never live in this repo. There are two ways to connect, both passed
-as ``--profile``:
+The default is ``GIS("home")``, which borrows whichever portal ArcGIS Pro is
+signed in to. Nothing is typed, prompted for, or stored, and it works with
+SAML/SSO accounts that cannot accept a password from a script. Pro does not need
+to be running -- the sign-in token persists -- but this reads the token through
+``arcpy``, so commands must run in ArcGIS Pro's Python environment.
 
-**A stored profile** (any name). The ArcGIS API keeps the username and org URL in
-``~/.arcgisprofile`` and the password in the operating system keyring, so a
-checked-out copy of this repo is inert without a local profile::
+Outside a hosted ArcGIS Notebook the ArcGIS API rewrites ``home`` to ``pro``, so
+the two are interchangeable on a desktop. Inside a notebook, ``home`` uses the
+notebook's identity instead.
 
-    agol-provision setup-profile --name vsclr --org https://yourorg.maps.arcgis.com --username you
-    agol-provision discover --profile vsclr ...
-
-**The ArcGIS Pro connection** (``--profile pro``, or ``home``). Borrows whichever
-portal ArcGIS Pro is signed in to. No credentials are stored or typed anywhere,
-and it works with SAML/SSO accounts, which cannot accept a password from a
-script. Pro does not need to be running -- it reads the persisted sign-in token --
-but this path calls into ``arcpy``, so the command must run inside ArcGIS Pro's
-own Python environment.
-
-``home`` and ``pro`` differ only inside a hosted ArcGIS Notebook, where ``home``
-uses the notebook's identity. Outside one, the ArcGIS API silently rewrites
-``home`` to ``pro``, so either works on a desktop.
+Any other ``--profile`` value is treated as a stored ArcGIS profile: username and
+org URL in ``~/.arcgisprofile``, password in the OS keyring. That is the fallback
+for a machine without ArcGIS Pro, or an unattended run.
 """
 
 from __future__ import annotations
@@ -69,8 +62,7 @@ def connect(profile: str) -> GIS:
             f"Could not connect using profile {profile!r}: {exc}\n"
             f"Create it with: agol-provision setup-profile --name {profile} "
             f"--org https://yourorg.maps.arcgis.com --username YOURUSER\n"
-            f"If your organization uses single sign-on, use --client-id instead, or "
-            f"run with --profile pro from ArcGIS Pro's Python environment."
+            f"Or drop --profile entirely to use the ArcGIS Pro connection."
         ) from exc
 
     if gis.users.me is None:

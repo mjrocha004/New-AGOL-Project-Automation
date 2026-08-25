@@ -40,62 +40,42 @@ def main() -> None:
 @main.command("setup-profile")
 @click.option("--name", required=True, help="Local profile name, e.g. vsclr.")
 @click.option("--org", required=True, help="https://yourorg.maps.arcgis.com")
-@click.option("--username", help="AGOL username. Use for built-in ArcGIS accounts.")
-@click.option("--client-id", help="OAuth app client id. Use for SSO / enterprise logins.")
-def setup_profile(name: str, org: str, username: str | None, client_id: str | None) -> None:
-    """Store AGOL credentials in a local profile.
+@click.option("--username", required=True, help="AGOL username.")
+def setup_profile(name: str, org: str, username: str) -> None:
+    """Store credentials for a machine without ArcGIS Pro.
 
-    Two sign-in paths, depending on how your organization authenticates:
+    Not needed for normal use: the default connection borrows ArcGIS Pro's
+    sign-in and stores nothing. This exists for a machine without Pro, or an
+    unattended run where no one is signed in.
 
-    \b
-      --username    Built-in ArcGIS account. Prompts for a password, which is
-                    handed to the ArcGIS API and stored in the OS keyring.
-      --client-id   SSO / SAML / enterprise login. Opens a browser to sign in and
-                    asks for the resulting authorization code. SAML accounts
-                    cannot accept a password directly, so this is the only path
-                    that works for them.
-
-    Either way, nothing is written to this repository, shell history, or command
-    output.
+    The password is prompted for, handed to the ArcGIS API, and stored in the OS
+    keyring -- never in this repository, shell history, or command output. Note
+    that SSO accounts cannot sign in this way; on those, use the Pro connection.
     """
     from arcgis.gis import GIS
 
-    if bool(username) == bool(client_id):
-        _fail(
-            "Pass exactly one of --username (built-in account) or --client-id (SSO).\n"
-            "If sign-in normally sends you to your company's login page, you need "
-            "--client-id.\n"
-            "Register an OAuth app in AGOL: Content > New item > Application > Other "
-            "application, then copy its Client ID."
-        )
-
+    password = click.prompt("AGOL password", hide_input=True)
     try:
-        if client_id:
-            console.print("A browser window will open. Sign in, then paste the code here.")
-            gis = GIS(url=org, client_id=client_id, profile=name)
-        else:
-            password = click.prompt("AGOL password", hide_input=True)
-            gis = GIS(url=org, username=username, password=password, profile=name)
+        gis = GIS(url=org, username=username, password=password, profile=name)
     except Exception as exc:
         _fail(
             f"Could not sign in: {exc}\n\n"
             "If your organization uses single sign-on, a username and password will "
-            "not work -- re-run with --client-id instead."
+            "not work. Run from ArcGIS Pro's Python environment instead, where the "
+            "default connection borrows Pro's existing sign-in."
         )
 
     console.print(f"[green]Saved profile[/green] {name!r} for {gis.users.me.username}.")
-    console.print("Credentials are in the OS keyring, not in this repo.")
-    console.print("Verify the machine is ready with: [cyan]agol-provision doctor "
-                  f"--profile {name}[/cyan]")
+    console.print(f"Use it with: [cyan]--profile {name}[/cyan]")
 
 
 # ---------------------------------------------------------------- environment
 
 
 @main.command()
-@click.option("--profile", help="Profile to test, or 'pro' for the ArcGIS Pro "
-                                "connection. Omit to check the install only.")
-def doctor(profile: str | None) -> None:
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
+def doctor(profile: str) -> None:
     """Check that this machine can run the tool.
 
     Verifies the Python and ArcGIS API versions, that the OS keyring actually
@@ -145,20 +125,25 @@ def doctor(profile: str | None) -> None:
 
     from agol_provision.auth import arcpy_available, uses_arcgis_pro
 
-    pro_mode = bool(profile) and uses_arcgis_pro(profile)
+    pro_mode = uses_arcgis_pro(profile)
     has_arcpy = arcpy_available()
 
     console.print()
     console.print("[bold]Sign-in options available here[/bold]")
     if pro_mode:
-        # Requested explicitly, so now it is a requirement rather than an option.
-        check("--profile pro (borrows ArcGIS Pro's connection)", has_arcpy,
-              "arcpy present" if has_arcpy else "arcpy not importable")
+        # The default connection, so arcpy is a requirement rather than an option.
+        check(f"arcpy importable (needed by --profile {profile})", has_arcpy,
+              "present" if has_arcpy else "not importable")
         if not has_arcpy:
-            console.print("        [yellow]Run from a clone of ArcGIS Pro's conda "
-                          "environment, or use a stored profile instead.[/yellow]")
+            console.print()
+            console.print("[bold red]Not ready.[/bold red] This is not ArcGIS Pro's "
+                          "Python environment.")
+            console.print("Point VS Code at Pro's interpreter (or a clone of it), or "
+                          "use a stored profile with --profile NAME.")
+            # Attempting the connection would fail with the same cause, reported twice.
+            sys.exit(1)
     else:
-        note("--profile pro (borrows ArcGIS Pro's connection)", has_arcpy,
+        note("ArcGIS Pro connection available", has_arcpy,
              "arcpy present" if has_arcpy else "needs ArcGIS Pro's Python environment")
 
     # A stored profile keeps its password in the OS keyring. The Pro connection
@@ -173,10 +158,7 @@ def doctor(profile: str | None) -> None:
             # a dummy value is the only way to know it works.
             keyring.set_password("agol-provision-doctor", "test", "ok")
             stored = keyring.get_password("agol-provision-doctor", "test")
-            if profile:
-                check("keyring stores and returns a secret", stored == "ok", backend)
-            else:
-                note("stored profile (keyring holds the password)", stored == "ok", backend)
+            check("keyring stores and returns a secret", stored == "ok", backend)
             try:
                 keyring.delete_password("agol-provision-doctor", "test")
             except Exception:
@@ -186,11 +168,6 @@ def doctor(profile: str | None) -> None:
             console.print("        [yellow]Without a keyring the ArcGIS API cannot store "
                           "a profile password securely. --profile pro avoids the "
                           "question entirely.[/yellow]")
-
-    if not profile:
-        console.print()
-        console.print("[dim]Pass --profile NAME to also test the AGOL connection.[/dim]")
-        sys.exit(0 if ok else 1)
 
     console.print()
     label = "ArcGIS Pro connection" if pro_mode else f"Profile {profile}"
@@ -210,8 +187,8 @@ def doctor(profile: str | None) -> None:
 
     console.print()
     if ok:
-        console.print("[bold green]Ready.[/bold green] Next: agol-provision discover "
-                      f"--profile {profile} --group \"Templates\"")
+        console.print("[bold green]Ready.[/bold green] Next: "
+                      "python -m agol_provision.cli discover --group \"Templates\"")
     else:
         console.print("[bold red]Not ready.[/bold red] Fix the failures above first.")
     sys.exit(0 if ok else 1)
@@ -221,7 +198,8 @@ def doctor(profile: str | None) -> None:
 
 
 @main.command()
-@click.option("--profile", required=True, help="Stored AGOL profile name.")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
 @click.option("--group", help="Template group id or title to read items from.")
 @click.option("--ids", "ids_file", type=click.Path(exists=True),
               help="File with one template item id per line.")
@@ -312,7 +290,8 @@ def discover(profile, group, ids_file, query, manifest_name, out) -> None:
 
 
 @main.command("spike-master")
-@click.option("--profile", required=True, help="Stored AGOL profile name.")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
 @click.option("--master-id", required=True, help="Template master feature service item id.")
 @click.option("--keep", is_flag=True, help="Leave the test service in place for inspection.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")

@@ -81,8 +81,13 @@ def collect(
     """Gather the template items by group, explicit id list, or search query."""
     if item_ids:
         found = []
-        for iid in item_ids:
-            it = gis.content.get(iid.strip())
+        for raw in item_ids:
+            # Id files are meant to be hand-edited, so tolerate "# title" comments
+            # and blank lines rather than sending them to the API as ids.
+            iid = raw.split("#", 1)[0].strip()
+            if not iid:
+                continue
+            it = gis.content.get(iid)
             if it is None:
                 raise ValueError(f"No item with id {iid!r} is visible to this account.")
             found.append(it)

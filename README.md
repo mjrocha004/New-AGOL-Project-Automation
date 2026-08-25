@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 161 tests pass, none needing network access.
+the master schema copies faithfully. 177 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -80,12 +80,39 @@ Exits non-zero on failure.
 
 ### 1. Discover the templates (read-only)
 
+First tell the tool which items are the templates. It cannot infer this — nothing
+distinguishes a template from a real project except your intent.
+
+Three selectors: `--group` (id or title), `--query` (AGOL search), or `--ids`
+(explicit list, one item id per line).
+
+**Recommended: keep all templates in one AGOL group.** Then the selector is
+`--group "AGOL Templates"` forever, adding a template is one share action, and the
+group doubles as the access control that stops anyone editing a template by
+accident. If no such group exists yet, these read-only commands help you find or
+build the list:
+
 ```bat
-python -m agol_provision.cli discover --group "Templates"
+python -m agol_provision.cli list-groups
+python -m agol_provision.cli list-content --query "owner:TEMPLATE_OWNER"
+python -m agol_provision.cli list-content --query "owner:TEMPLATE_OWNER" --save-ids ids.txt
 ```
 
-Locate the templates however suits: `--group` (id or title), `--ids ids.txt` (one
-item id per line), or `--query "title:VSCLR Template"`.
+`--save-ids` writes `<id>  # <title>` per line. Edit that file freely — comments
+and blank lines are ignored — then feed it in with `--ids`.
+
+Always confirm the selector before it writes anything:
+
+```bat
+python -m agol_provision.cli discover --group "AGOL Templates" --dry-run
+```
+
+`--dry-run` lists what matched, counts the roles, warns if it did not find exactly
+one master feature service, and stops. Drop the flag when the list looks right:
+
+```bat
+python -m agol_provision.cli discover --group "AGOL Templates"
+```
 
 Writes three things:
 

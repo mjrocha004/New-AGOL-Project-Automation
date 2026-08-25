@@ -245,11 +245,13 @@ def list_groups(profile: str, search: str | None) -> None:
 @click.option("--query", required=True,
               help='AGOL search, e.g. "title:VSCLR Template" or "owner:jsmith".')
 @click.option("--limit", default=50, show_default=True)
-def list_content(profile: str, query: str, limit: int) -> None:
+@click.option("--save-ids", type=click.Path(), default=None,
+              help="Write the matched item ids to a file for `discover --ids`.")
+def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> None:
     """Search org content by title, owner, or type. Read-only.
 
-    Use it to work out a `discover --query`, or to collect item ids for
-    `discover --ids`.
+    Use it to work out a `discover --query`, or with --save-ids to capture an
+    explicit item list when no single search or group covers all the templates.
     """
     from agol_provision.auth import AuthError, connect, describe
     from agol_provision.discovery import classify
@@ -270,6 +272,24 @@ def list_content(profile: str, query: str, limit: int) -> None:
     for it in items:
         table.add_row(it.title, it.type, classify(it), it.owner, it.itemid)
     console.print(table)
+
+    roles = [classify(it) for it in items]
+    console.print(f"\nmaster: {roles.count('master')}  views: {roles.count('view')}  "
+                  f"maps: {roles.count('map')}  apps: {roles.count('app')}  "
+                  f"unknown: {roles.count('unknown')}")
+
+    if save_ids:
+        out = Path(save_ids)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # One id per line, the format `discover --ids` reads. Titles go in trailing
+        # comments so the file stays reviewable; collect() strips them.
+        out.write_text(
+            "\n".join(f"{it.itemid}  # {it.title}" for it in items) + "\n"
+        )
+        console.print(f"\n[green]Wrote {len(items)} id(s)[/green] to {save_ids}")
+        console.print("[dim]Edit the file to add or remove items, then:\n"
+                      f"  python -m agol_provision.cli discover --ids {save_ids} "
+                      f"--dry-run[/dim]")
 
 
 # ---------------------------------------------------------------- phase 0a

@@ -166,3 +166,49 @@ class TestSuggestKey:
 
     def test_untitled_item_still_gets_a_key(self):
         assert suggest_key(FakeItem(title="!!!"), set()) == "item"
+
+
+class TestIdFileParsing:
+    """`list-content --save-ids` writes "<id>  # <title>" so the file stays
+    reviewable, and it is meant to be hand-edited before use. collect() has to
+    tolerate what that produces."""
+
+    class FakeGIS:
+        def __init__(self, known):
+            self.content = self
+            self._known = known
+
+        def get(self, iid):
+            return self._known.get(iid)
+
+    def _collect(self, lines, known):
+        from agol_provision.discovery import collect
+
+        return collect(self.FakeGIS(known), item_ids=lines)
+
+    def test_strips_trailing_title_comments(self):
+        item = FakeItem(itemid=_id(1))
+        got = self._collect([f"{_id(1)}  # CompanyA Moline"], {_id(1): item})
+        assert got == [item]
+
+    def test_skips_blank_and_comment_only_lines(self):
+        item = FakeItem(itemid=_id(1))
+        got = self._collect(
+            ["", "   ", "# everything below is a view", f"{_id(1)}"], {_id(1): item}
+        )
+        assert got == [item]
+
+    def test_tolerates_surrounding_whitespace(self):
+        item = FakeItem(itemid=_id(1))
+        got = self._collect([f"   {_id(1)}   "], {_id(1): item})
+        assert got == [item]
+
+    def test_unknown_id_names_the_offending_value(self):
+        with pytest.raises(ValueError, match=_id(2)):
+            self._collect([f"{_id(2)}  # deleted template"], {})
+
+    def test_error_does_not_leak_the_comment_into_the_id(self):
+        """A comment surviving into the lookup would produce a confusing message."""
+        with pytest.raises(ValueError) as exc:
+            self._collect([f"{_id(2)}  # some title"], {})
+        assert "some title" not in str(exc.value)

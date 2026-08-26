@@ -464,6 +464,88 @@ def discover(profile, group, ids_file, extra_ids, query, manifest_name, out, lim
                       f"See the report before building.")
 
 
+# ---------------------------------------------------------------- reviewing
+
+
+@main.command()
+@click.option("--manifest", "manifest_path", type=click.Path(exists=True), default=None,
+              help="Manifest to render. Defaults to the generated vsclr-standard.yaml.")
+@click.option("--company", default="CompanyA", show_default=True,
+              help="Sample company name to render with.")
+@click.option("--location", default="Moline", show_default=True,
+              help="Sample location to render with.")
+def preview(manifest_path: str | None, company: str, location: str) -> None:
+    """Show every name a manifest would produce, for a sample project.
+
+    Nothing is created and no connection is made -- this is pure local
+    computation. Use it to check the title and service_name patterns before they
+    become permanent: AGOL reserves a hosted service name org-wide forever, so a
+    name only gets one chance to be right.
+    """
+    from agol_provision.manifest import ManifestError, load_manifest
+    from agol_provision.naming import NamingError, NameContext
+
+    path = Path(manifest_path) if manifest_path else (
+        REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
+    )
+    try:
+        manifest = load_manifest(path)
+    except ManifestError as exc:
+        _fail(str(exc))
+
+    ctx = NameContext(company=company, location=location)
+    console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} "
+                  f"-- {manifest.total_items()} items")
+    console.print(f"Rendered for [cyan]{company} / {location}[/cyan]\n")
+
+    table = Table(title="Item titles and service names")
+    for col in ("Kind", "Key", "Title", "Service name"):
+        table.add_column(col, overflow="fold")
+
+    def row(kind: str, key: str, title_pat: str, sn_pat: str | None) -> None:
+        try:
+            title = ctx.render_title(title_pat)
+        except (NamingError, KeyError, IndexError) as exc:
+            title = f"[red]{exc}[/red]"
+        if sn_pat is None:
+            service = "[dim]n/a[/dim]"
+        else:
+            try:
+                service = ctx.render_service_name(sn_pat)
+            except (NamingError, KeyError, IndexError) as exc:
+                service = f"[red]{exc}[/red]"
+        table.add_row(kind, key, title, service)
+
+    row("master", manifest.master.key, manifest.master.title, manifest.master.service_name)
+    for v in manifest.views:
+        row("view", v.key, v.title, v.service_name)
+    for g in manifest.groups:
+        row("group", g.key, g.title, None)
+    for i in manifest.cloned_items:
+        row("map" if i in manifest.maps else "app", i.key, i.title, None)
+    console.print(table)
+
+    # Service names are the ones worth scrutinising: titles can be renamed later,
+    # a hosted service name is reserved org-wide permanently.
+    names = [ctx.render_service_name(manifest.master.service_name)]
+    names += [ctx.render_service_name(v.service_name) for v in manifest.views]
+    dupes = {n for n in names if names.count(n) > 1}
+    console.print()
+    if dupes:
+        err.print(f"Duplicate service names: {', '.join(sorted(dupes))}. "
+                  f"Each must be unique -- the run would fail partway through.")
+    longest = max(names, key=len)
+    console.print(f"[dim]{len(names)} service names, longest {len(longest)} chars "
+                  f"({longest}).[/dim]")
+    console.print("[dim]Service names are permanent org-wide, even after deletion. "
+                  "Titles can be changed later; these cannot.[/dim]")
+
+    ungrouped = [i.key for i in manifest.cloned_items if not i.share_to]
+    if ungrouped:
+        console.print(f"\n[yellow]No share_to set for: {', '.join(ungrouped)}[/yellow] "
+                      f"-- these would be created but shared to nothing.")
+
+
 # ---------------------------------------------------------------- phase 0b
 
 

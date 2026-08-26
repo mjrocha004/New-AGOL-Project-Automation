@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 248 tests pass, none needing network access.
+the master schema copies faithfully. 269 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -87,6 +87,7 @@ asks first.
 | `list-groups` | Groups you belong to, with item counts. |
 | `list-content` | Search org content by title, owner, or type. |
 | `discover` | Audit the templates; write the manifest, snapshots, and report. |
+| `preview` | Show every name a manifest would produce. No connection needed. |
 | `spike-master` | Test whether the master schema copies faithfully. |
 | `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
 
@@ -162,10 +163,36 @@ The dependency graph is derived by scanning each item's JSON for the ids of othe
 template items, so it finds edges regardless of item type — including those buried
 in dashboard widget datasources and Experience Builder draft configs.
 
-Afterwards, edit the generated manifest: shorten the suggested keys, check the
-title and `service_name` patterns, and fill in `share_to` for each map and app.
-Sharing cannot be derived — the templates' own sharing points at template groups,
-not the per-project groups this tool creates.
+### Reviewing the generated manifest
+
+Discovery fills in everything it can read. What needs your eyes:
+
+**Titles and service names.** Render them for a sample project rather than
+reasoning about the patterns:
+
+```bat
+python -m agol_provision.cli preview --company CompanyA --location Moline
+```
+
+`{base}` expands to `CompanyA Moline`, `{base_sn}` to `CompanyA_Moline`. Titles
+are cosmetic and can be changed later. **Service names cannot** — AGOL reserves a
+hosted service name org-wide permanently, even after the service is deleted, so
+they get one chance to be right. Discovery derives them from each template's
+title, which can produce long ones like `{base_sn}_Contractor_CX_Redline_View`;
+shortening to `{base_sn}_Redline` is worth doing now. `preview` reports the
+longest name and flags any duplicates.
+
+**Groups and `share_to`.** `share_to` lists the group keys from the manifest's own
+`groups:` section — which discovery proposes by reading which groups each template
+is actually shared to. The template groups are not a project's groups, but their
+shape is right: a view sitting in a contractor template group belongs in that
+project's contractor group. So the membership is real; edit the group *titles* to
+your project naming pattern. `preview` warns about any map or app with no
+`share_to`, which would be created and then shared to nothing.
+
+**Keys** are internal identifiers used in `consumes` and `share_to` and in run
+state. They only need to be unique and readable. Shorten them if you will be
+typing them; otherwise leave them.
 
 > **Worth doing once:** put every template in a single AGOL group. The selector
 > then becomes `--group "AGOL Templates"` permanently, adding a template is one

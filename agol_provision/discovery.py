@@ -50,6 +50,7 @@ class TemplateItem:
     depends_on: list[str] = field(default_factory=list)  # item ids
     detail: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    groups: list[tuple[str, str]] = field(default_factory=list)  # (group id, title)
 
     @property
     def item_id(self) -> str:
@@ -458,6 +459,7 @@ def inspect_all(gis: GIS, items: list[Item]) -> list[TemplateItem]:
                 depends_on=find_dependencies(item, known_ids),
                 detail=detail,
                 warnings=warnings,
+                groups=item_groups(item),
             )
         )
     return results
@@ -496,7 +498,7 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
             "service_name": "{base_sn}",
         },
         "views": [],
-        "groups": [],
+        "groups": _derive_groups(inspected, prefix),
         "maps": [],
         "apps": [],
     }
@@ -519,9 +521,7 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
                     "item_type": t.item.type,
                     "title": _title_pattern(t.title, prefix),
                     "consumes": refs(t),
-                    # Sharing cannot be derived: the template's own sharing reflects
-                    # template groups, not the per-project groups this tool creates.
-                    "share_to": [],
+                    "share_to": [_group_key(title) for _, title in t.groups],
                 }
             )
     return manifest
@@ -722,3 +722,51 @@ def write_id_file(items: list[Item], path: Path) -> int:
         lines.append(f"{item.itemid}  # [{classify(item):<7}] {item.title}")
     path.write_text("\n".join(lines) + "\n")
     return len(items)
+
+
+def item_groups(item: Item) -> list[tuple[str, str]]:
+    """Groups an item is shared to, as (id, title). Empty if unreadable."""
+    try:
+        groups = item.sharing.groups.list()
+    except Exception:
+        return []
+    out = []
+    for g in groups or []:
+        gid = getattr(g, "groupid", None) or getattr(g, "id", None)
+        title = getattr(g, "title", None)
+        if gid and title:
+            out.append((gid, title))
+    return sorted(out, key=lambda t: t[1].lower())
+
+
+def _group_key(title: str) -> str:
+    """Stable manifest key for a group, derived from its title."""
+    return re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "group"
+
+
+def _derive_groups(inspected: list[TemplateItem], prefix: str) -> list[dict[str, Any]]:
+    """Propose the groups section from how the templates are actually shared.
+
+    The template groups are not the groups a project gets -- but their *shape* is
+    exactly right. If the Design template view is shared to a contractor group,
+    then a project's Design view belongs in that project's contractor group. So
+    these are proposals: the titles need editing to the project naming pattern,
+    but the membership is real rather than guessed.
+    """
+    by_key: dict[str, dict[str, Any]] = {}
+    for t in inspected:
+        for _, title in t.groups:
+            key = _group_key(title)
+            entry = by_key.setdefault(
+                key,
+                {
+                    "key": key,
+                    "title": _title_pattern(title, prefix),
+                    "access": "private",
+                    "consumes": [],
+                },
+            )
+            # `consumes` documents which views a group carries; verify checks it.
+            if t.role == "view" and t.key not in entry["consumes"]:
+                entry["consumes"].append(t.key)
+    return [by_key[k] for k in sorted(by_key)]

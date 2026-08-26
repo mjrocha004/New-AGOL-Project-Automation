@@ -120,3 +120,44 @@ class TestSingleIdOption:
         cmd = main.commands["discover"]
         opt = next(p for p in cmd.params if p.name == "ids_file")
         assert isinstance(opt.type, click.Path) and opt.type.exists
+
+
+class TestPreview:
+    """Service names are permanent org-wide, so they get one chance to be right.
+    preview renders them locally, before anything is created."""
+
+    def test_command_exists(self):
+        assert "preview" in main.commands
+
+    def test_needs_no_connection(self):
+        """Pure local computation -- no --profile, so it cannot touch AGOL."""
+        cmd = main.commands["preview"]
+        assert not any(p.name == "profile" for p in cmd.params)
+
+    def test_renders_the_example_manifest(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        # rich wraps table cells to the terminal width, which would split the
+        # names this asserts on.
+        monkeypatch.setenv("COLUMNS", "200")
+        result = CliRunner().invoke(main, [
+            "preview", "--manifest", "agol_provision/templates/EXAMPLE.yaml",
+            "--company", "CompanyA", "--location", "Moline",
+        ])
+        assert result.exit_code == 0, result.output
+        assert "CompanyA_Moline_Design" in result.output
+
+    def test_flags_duplicate_service_names(self, tmp_path):
+        """A collision would fail the run partway through, leaving debris."""
+        import yaml
+        from click.testing import CliRunner
+
+        src = yaml.safe_load(
+            open("agol_provision/templates/EXAMPLE.yaml").read().split("\n\n", 1)[-1]
+        )
+        src["views"][1]["service_name"] = src["views"][0]["service_name"]
+        path = tmp_path / "dupe.yaml"
+        path.write_text(yaml.safe_dump(src))
+
+        result = CliRunner().invoke(main, ["preview", "--manifest", str(path)])
+        assert "Duplicate service names" in result.output.replace("\n", " ")

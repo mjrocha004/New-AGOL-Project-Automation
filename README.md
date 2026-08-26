@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 177 tests pass, none needing network access.
+the master schema copies faithfully. 195 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -100,6 +100,11 @@ python -m agol_provision.cli list-content --query "owner:TEMPLATE_OWNER" --save-
 
 `--save-ids` writes `<id>  # <title>` per line. Edit that file freely — comments
 and blank lines are ignored — then feed it in with `--ids`.
+
+If a command reports **TRUNCATED**, more items matched than were retrieved; re-run
+with the `--limit` it suggests. `discover` treats truncation as a hard error rather
+than a warning: a short template set would yield a short manifest, and the omission
+would not surface until an app opened with a missing layer.
 
 Always confirm the selector before it writes anything:
 

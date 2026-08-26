@@ -71,14 +71,55 @@ class TemplateItem:
 # ---------------------------------------------------------------- collection
 
 
+# ContentManager.search() defaults max_items to 10 and caps at 10,000. Group.content()
+# defaults to 1000. Both truncate silently, which for a discovery tool is the worst
+# possible failure: a short template set yields a short manifest, and nothing in the
+# output says so. Every path below fetches generously and then verifies the count.
+DEFAULT_SEARCH_LIMIT = 1000
+SEARCH_CEILING = 10_000
+
+
+class TruncatedError(ValueError):
+    """More items matched than were retrieved. Continuing would silently omit some."""
+
+
+def count_matches(gis: GIS, query: str) -> int | None:
+    """Total items matching a query, without fetching them.
+
+    Returns None when the org does not support the count, in which case callers
+    fall back to comparing the result length against the requested limit.
+    """
+    try:
+        result = gis.content.advanced_search(query, return_count=True)
+    except Exception:
+        return None
+    if isinstance(result, bool):  # some builds return a flag rather than a count
+        return None
+    if isinstance(result, dict):
+        for key in ("total", "num", "count"):
+            if key in result:
+                return int(result[key])
+        return None
+    try:
+        return int(result)
+    except (TypeError, ValueError):
+        return None
+
+
 def collect(
     gis: GIS,
     *,
     group: str | None = None,
     item_ids: list[str] | None = None,
     query: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> list[Item]:
-    """Gather the template items by group, explicit id list, or search query."""
+    """Gather the template items by group, explicit id list, or search query.
+
+    Raises TruncatedError rather than returning a partial set: an incomplete
+    manifest would provision an incomplete project, and the omission would not
+    surface until someone opened an app with a missing layer.
+    """
     if item_ids:
         found = []
         for raw in item_ids:
@@ -100,10 +141,33 @@ def collect(
             if not matches:
                 raise ValueError(f"No group matching {group!r} is visible to this account.")
             grp = matches[0]
-        return list(grp.content())
+        items = list(grp.content(max_items=limit))
+        if len(items) >= limit:
+            raise TruncatedError(
+                f"Group {grp.title!r} returned {len(items)} items, which is the "
+                f"requested limit -- there are probably more. Re-run with a higher "
+                f"--limit."
+            )
+        return items
 
     if query:
-        return list(gis.content.search(query, max_items=200))
+        if limit > SEARCH_CEILING:
+            raise ValueError(f"AGOL caps search at {SEARCH_CEILING:,} items.")
+        items = list(gis.content.search(query, max_items=limit))
+
+        total = count_matches(gis, query)
+        if total is not None and total > len(items):
+            raise TruncatedError(
+                f"{query!r} matches {total} items but only {len(items)} were "
+                f"retrieved. Re-run with --limit {total + 10}, or narrow the query."
+            )
+        if total is None and len(items) >= limit:
+            # No exact count available; hitting the limit exactly is the tell.
+            raise TruncatedError(
+                f"{query!r} returned {len(items)} items, which is the requested "
+                f"limit -- there are probably more. Re-run with a higher --limit."
+            )
+        return items
 
     raise ValueError("Provide one of --group, --ids, or --query to locate the templates.")
 

@@ -244,7 +244,8 @@ def list_groups(profile: str, search: str | None) -> None:
               help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
 @click.option("--query", required=True,
               help='AGOL search, e.g. "title:VSCLR Template" or "owner:jsmith".')
-@click.option("--limit", default=50, show_default=True)
+@click.option("--limit", default=200, show_default=True,
+              help="Maximum items to retrieve.")
 @click.option("--save-ids", type=click.Path(), default=None,
               help="Write the matched item ids to a file for `discover --ids`.")
 def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> None:
@@ -254,7 +255,7 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
     explicit item list when no single search or group covers all the templates.
     """
     from agol_provision.auth import AuthError, connect, describe
-    from agol_provision.discovery import classify
+    from agol_provision.discovery import classify, count_matches
 
     try:
         gis = connect(profile)
@@ -265,6 +266,13 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
     items = list(gis.content.search(query, max_items=limit))
     if not items:
         _fail(f"Nothing matched {query!r}.")
+
+    # Showing the first N of M without saying so reads as "these are all your
+    # matches", which is how an incomplete template list gets built.
+    total = count_matches(gis, query)
+    truncated = (total is not None and total > len(items)) or (
+        total is None and len(items) >= limit
+    )
 
     table = Table(title=f"Matches ({len(items)})")
     for col in ("Title", "Type", "Role", "Owner", "Id"):
@@ -277,6 +285,16 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
     console.print(f"\nmaster: {roles.count('master')}  views: {roles.count('view')}  "
                   f"maps: {roles.count('map')}  apps: {roles.count('app')}  "
                   f"unknown: {roles.count('unknown')}")
+
+    if truncated:
+        shortfall = f"{total} match" if total is not None else "more"
+        console.print()
+        err.print(
+            f"TRUNCATED: showing {len(items)} items, but {shortfall}. "
+            f"Re-run with --limit {(total + 10) if total is not None else limit * 4}."
+        )
+        if save_ids:
+            _fail("Refusing to write a partial id list.")
 
     if save_ids:
         out = Path(save_ids)
@@ -306,9 +324,11 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
               help="Name for the generated manifest.")
 @click.option("--out", type=click.Path(), default=None,
               help="Manifest output path. Defaults to the templates directory.")
+@click.option("--limit", default=None, type=int,
+              help="Maximum items to retrieve. Raise it if a run reports truncation.")
 @click.option("--dry-run", is_flag=True,
               help="Show which items matched, then stop. Writes nothing.")
-def discover(profile, group, ids_file, query, manifest_name, out, dry_run) -> None:
+def discover(profile, group, ids_file, query, manifest_name, out, limit, dry_run) -> None:
     """Audit the template items and generate a manifest, snapshots, and a report.
 
     Read-only: this command never writes to ArcGIS Online.
@@ -334,7 +354,12 @@ def discover(profile, group, ids_file, query, manifest_name, out, dry_run) -> No
         item_ids = [ln.strip() for ln in Path(ids_file).read_text().splitlines() if ln.strip()]
 
     try:
-        items = discovery.collect(gis, group=group, item_ids=item_ids, query=query)
+        kwargs = {"limit": limit} if limit else {}
+        items = discovery.collect(gis, group=group, item_ids=item_ids, query=query, **kwargs)
+    except discovery.TruncatedError as exc:
+        # Not a warning: a short template set yields a short manifest, and the
+        # omission would not surface until an app opened with a missing layer.
+        _fail(f"{exc}\n\nRefusing to build a manifest from an incomplete set.")
     except ValueError as exc:
         _fail(str(exc))
 

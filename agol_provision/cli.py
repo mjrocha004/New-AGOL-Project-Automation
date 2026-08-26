@@ -483,6 +483,7 @@ def spike_master(profile, master_id, keep, yes) -> None:
     from arcgis.features import FeatureLayerCollection
 
     from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.safety import refuse_delete_reason, spike_service_name
     from agol_provision.schema_diff import diff_fingerprints, fingerprint_service, summarize
 
     try:
@@ -496,15 +497,20 @@ def spike_master(profile, master_id, keep, yes) -> None:
     if template.type != "Feature Service":
         _fail(f"{template.title!r} is a {template.type}, not a Feature Service.")
 
-    spike_name = f"ZZZ_SPIKE_TEST_{master_id[:8]}"
+    spike_name = spike_service_name(master_id)
 
     console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
     console.print(f"Template: [cyan]{template.title}[/cyan] ({master_id})")
     console.print()
     console.print("This will:")
-    console.print(f"  1. create a feature service named [yellow]{spike_name}[/yellow]")
-    console.print("  2. compare its schema against the template")
-    console.print(f"  3. {'leave it in place (--keep)' if keep else 'delete it'}")
+    console.print(f"  1. create ONE new feature service named [yellow]{spike_name}[/yellow]")
+    console.print("  2. compare its schema against the template (read-only)")
+    console.print(f"  3. {'leave it in place (--keep)' if keep else 'delete that new service'}")
+    console.print()
+    console.print("[green]It does not modify or delete anything that already exists.[/green]")
+    console.print("[dim]The template is only read. The only delete targets the service "
+                  "created in step 1, and is refused if that item is not what step 1 "
+                  "returned.[/dim]")
     console.print()
     console.print("[dim]Note: AGOL reserves a service name permanently, even after "
                   "deletion. This name is used every run so it only ever burns one.[/dim]")
@@ -565,11 +571,23 @@ def spike_master(profile, master_id, keep, yes) -> None:
         # Always clean up, including on an exception partway through the comparison
         # -- an abandoned test service would otherwise sit in the org.
         if copy_item is not None and not keep:
-            try:
-                copy_item.delete()
-                console.print(f"[dim]Deleted {spike_name}.[/dim]")
-            except Exception as exc:
-                err.print(f"Could not delete {spike_name}: {exc}\nDelete it by hand.")
+            refusal = refuse_delete_reason(
+                copy_item, template_id=master_id, expected_name=spike_name
+            )
+            if refusal:
+                # Asymmetric costs: a leftover test service is a ten-second
+                # cleanup, a wrongly deleted service is not.
+                err.print(
+                    f"REFUSING to delete item {getattr(copy_item, 'itemid', '?')} "
+                    f"because {refusal}.\nLeft in place. Review it before removing "
+                    f"anything by hand."
+                )
+            else:
+                try:
+                    copy_item.delete()
+                    console.print(f"[dim]Deleted {spike_name}.[/dim]")
+                except Exception as exc:
+                    err.print(f"Could not delete {spike_name}: {exc}\nDelete it by hand.")
         elif copy_item is not None:
             console.print(f"[yellow]Left {spike_name} in place (--keep).[/yellow]")
 

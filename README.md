@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 237 tests pass, none needing network access.
+the master schema copies faithfully. 248 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -198,6 +198,14 @@ inspection.
 > AGOL reserves a hosted service name permanently, even after deletion. The spike
 > reuses one fixed name so it only ever burns that one.
 
+**What it touches.** The template is only ever read. The command creates exactly
+one new feature service, and the single `delete()` call in this codebase targets
+that newly created item and nothing else. That is checked rather than assumed:
+`safety.py` refuses the delete if the item is the template, lacks the
+`ZZZ_SPIKE_TEST_` prefix, or is not the service the copy returned — leaving it in
+place instead. A leftover test service is a ten-second cleanup; a wrongly deleted
+service is not. Pass `--keep` to skip the delete entirely.
+
 ## Signing in
 
 The default is `GIS("home")`, which borrows ArcGIS Pro's sign-in. Outside a hosted
@@ -241,6 +249,7 @@ edit, not a rewrite. See `templates/EXAMPLE.yaml` for the full 21-item shape.
 | `auth.py` | Connection, version and privilege checks. | Phase 0 |
 | `discovery.py` | Read-only template audit. | Phase 0 |
 | `schema_diff.py` | Structural comparison of two feature services. | Phase 0 |
+| `safety.py` | Guards on the only destructive operation. | Phase 0 |
 | `manifest.py` | Manifest schema and cross-reference validation. | Phase 0 → |
 | `naming.py` | Titles and service names. Separate namespaces, different rules. | Phase 2 |
 | `state.py` | What a run created. Idempotent resume and rollback. | Phase 2 |

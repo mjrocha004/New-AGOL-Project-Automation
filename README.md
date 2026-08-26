@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 221 tests pass, none needing network access.
+the master schema copies faithfully. 227 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -76,83 +76,78 @@ Exits non-zero on failure.
 > If it reports `arcgis` below 2.4, Pro shipped an older API than this needs —
 > `remap_data()`, which rewires cloned maps and apps, arrived in 2.4.
 
-## Phase 0 — run these two, then send back the output
+## Commands
+
+All read-only except `spike-master`, which creates and deletes one service and
+asks first.
+
+| Command | Purpose |
+| --- | --- |
+| `doctor` | Check this machine can run the tool. |
+| `list-groups` | Groups you belong to, with item counts. |
+| `list-content` | Search org content by title, owner, or type. |
+| `discover` | Audit the templates; write the manifest, snapshots, and report. |
+| `spike-master` | Test whether the master schema copies faithfully. |
+| `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
+
+## Phase 0 — run these, then send back the output
 
 ### 1. Discover the templates (read-only)
 
 First tell the tool which items are the templates. It cannot infer this — nothing
 distinguishes a template from a real project except your intent.
 
-Three selectors: `--group` (id or title), `--query` (AGOL search), or `--ids`
-(explicit list, one item id per line).
+Three selectors, and **they combine**, deduplicated by item id:
 
-**Selectors combine.** `--group` is repeatable, and `--ids`/`--query` union with
-it, deduplicated by item id. That matters in practice: the master feature service
-is often shared to no group at all, so the real selector is usually "these groups,
-plus the master":
+| Selector | Notes |
+| --- | --- |
+| `--group "Title or id"` | Repeatable. |
+| `--ids file.txt` | One item id per line. |
+| `--query "title:VSCLR"` | AGOL search syntax. |
 
-```bat
-python -m agol_provision.cli discover --group "A" --group "B" --ids master.txt --dry-run
-```
+Combining matters in practice: the master feature service is often shared to no
+group at all, so the real selector is usually *these groups, plus the master*.
 
-where `master.txt` holds just the master's item id. `--dry-run` reports how many
-master services it found and says which way the selector is wrong — none found
-means something is missing, more than one means it is catching real project
-content.
-
-```bat
-python -m agol_provision.cli discover --group "Contractor Templates" --group "QC Templates" --dry-run
-```
-
-Those groups usually carry real project content as well, so the union is a
-superset. Dump it, prune it by hand, and run from the pruned file:
-
-```bat
-python -m agol_provision.cli discover --group "A" --group "B" --dry-run --save-ids ids.txt
-```
-
-`ids.txt` lists one id per line, sorted by role, with the title as a comment —
-delete the lines that are not templates, then:
-
-```bat
-python -m agol_provision.cli discover --ids ids.txt --dry-run
-python -m agol_provision.cli discover --ids ids.txt
-```
-
-**Recommended: keep all templates in one AGOL group.** Then the selector is
-`--group "AGOL Templates"` forever, adding a template is one share action, and the
-group doubles as the access control that stops anyone editing a template by
-accident. If no such group exists yet, these read-only commands help you find or
-build the list:
+**Finding what to pass.** If you do not already know:
 
 ```bat
 python -m agol_provision.cli list-groups
+```
+
+```bat
 python -m agol_provision.cli list-content --query "owner:TEMPLATE_OWNER"
-python -m agol_provision.cli list-content --query "owner:TEMPLATE_OWNER" --save-ids ids.txt
 ```
 
-`--save-ids` writes `<id>  # <title>` per line. Edit that file freely — comments
-and blank lines are ignored — then feed it in with `--ids`.
+Both print a role breakdown (master / view / map / app) so you can judge whether a
+selector is catching the right things.
 
-If a command reports **TRUNCATED**, more items matched than were retrieved; re-run
-with the `--limit` it suggests. `discover` treats truncation as a hard error rather
-than a warning: a short template set would yield a short manifest, and the omission
-would not surface until an app opened with a missing layer.
-
-Always confirm the selector before it writes anything:
+**Then work down to the real set.** Groups that hold templates usually hold real
+project content too, so expect the first pass to be a superset:
 
 ```bat
-python -m agol_provision.cli discover --group "AGOL Templates" --dry-run
+python -m agol_provision.cli discover --group "A" --group "B" --ids master.txt --dry-run --save-ids ids.txt
 ```
 
-`--dry-run` lists what matched, counts the roles, warns if it did not find exactly
-one master feature service, and stops. Drop the flag when the list looks right:
+`--dry-run` lists what matched, counts the roles, and stops without writing a
+manifest. Check it reports **master: 1** — none means something is missing, more
+than one means the selector is catching project content.
+
+`--save-ids` writes `ids.txt`: one id per line, sorted by role, each annotated
+`# [role   ] Title`, under a header reminding you of the next command. Delete the
+lines that are not templates — comments and blanks are ignored, so annotate
+freely. You should be left with 21.
+
+Confirm the pruned list, then run for real:
 
 ```bat
-python -m agol_provision.cli discover --group "AGOL Templates"
+python -m agol_provision.cli discover --ids ids.txt --dry-run
 ```
 
-Writes three things:
+```bat
+python -m agol_provision.cli discover --ids ids.txt
+```
+
+**What it writes:**
 
 | Path | What it is |
 | --- | --- |
@@ -168,6 +163,17 @@ Afterwards, edit the generated manifest: shorten the suggested keys, check the
 title and `service_name` patterns, and fill in `share_to` for each map and app.
 Sharing cannot be derived — the templates' own sharing points at template groups,
 not the per-project groups this tool creates.
+
+> **Worth doing once:** put every template in a single AGOL group. The selector
+> then becomes `--group "AGOL Templates"` permanently, adding a template is one
+> share action rather than a config edit, and the group doubles as the access
+> control that stops anyone editing a template by accident. Keep `ids.txt`
+> committed as a stand-in until then.
+
+> **TRUNCATED** in any output means more items matched than were retrieved —
+> re-run with the `--limit` it names. `discover` treats truncation as a hard error
+> rather than a warning: a short template set yields a short manifest, and the
+> omission would not surface until an app opened with a missing layer.
 
 ### 2. Spike the master copy (creates and deletes one service)
 

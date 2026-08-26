@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 233 tests pass, none needing network access.
+the master schema copies faithfully. 237 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -102,11 +102,13 @@ Three selectors, and **they combine**, deduplicated by item id:
 | Selector | Notes |
 | --- | --- |
 | `--group "Title or id"` | Repeatable — pass it as many times as you need. |
-| `--ids file.txt` | One item id per line. |
+| `--id <item id>` | A single item id. Repeatable. No file needed. |
+| `--ids file.txt` | A file of item ids, one per line. Must already exist. |
 | `--query "title:VSCLR"` | AGOL search syntax. |
 
 Combining matters in practice: the master feature service is often shared to no
-group at all, so the real selector is usually *these groups, plus the master*.
+group at all, so the real selector is usually *these groups, plus the master* —
+which is what `--id` is for.
 
 **Finding what to pass.** If you do not already know:
 
@@ -125,7 +127,7 @@ selector is catching the right things.
 project content too, so expect the first pass to be a superset:
 
 ```bat
-python -m agol_provision.cli discover --group "A" --group "B" --ids master.txt --dry-run --save-ids ids.txt
+python -m agol_provision.cli discover --group "A" --group "B" --dry-run --save-ids ids.txt
 ```
 
 `--dry-run` lists what matched, counts the roles, and stops without writing a
@@ -135,7 +137,8 @@ than one means the selector is catching project content.
 `--save-ids` writes `ids.txt`: one id per line, sorted by role, each annotated
 `# [role   ] Title`, under a header reminding you of the next command. Delete the
 lines that are not templates — comments and blanks are ignored, so annotate
-freely. You should be left with 21.
+freely. Add any item the groups missed by pasting its id on its own line; the
+master usually needs this. You should be left with 21.
 
 Confirm the pruned list, then run for real:
 

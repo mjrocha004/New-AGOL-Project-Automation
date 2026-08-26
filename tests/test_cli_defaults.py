@@ -88,3 +88,35 @@ class TestReadOnlyCommands:
     def test_spike_master_has_a_confirmation_escape_hatch(self):
         cmd = main.commands["spike-master"]
         assert any(p.name == "yes" for p in cmd.params)
+
+
+class TestSingleIdOption:
+    """--ids needs a file that must already exist, which turned "add the master"
+    into "create a one-line file first". --id takes the id directly.
+    """
+
+    def test_discover_accepts_a_bare_item_id(self):
+        cmd = main.commands["discover"]
+        opt = next(p for p in cmd.params if p.name == "extra_ids")
+        assert opt.multiple and "--id" in opt.opts
+
+    def test_id_and_ids_are_distinct_options(self):
+        cmd = main.commands["discover"]
+        names = {p.name for p in cmd.params}
+        assert {"extra_ids", "ids_file"} <= names
+
+    def test_id_requires_no_pre_existing_file(self):
+        """--ids uses click.Path(exists=True); --id must not."""
+        import click
+
+        cmd = main.commands["discover"]
+        opt = next(p for p in cmd.params if p.name == "extra_ids")
+        assert not isinstance(opt.type, click.Path)
+
+    def test_ids_file_still_fails_fast_on_a_bad_path(self):
+        """Failing on a typo'd path is right -- silently reading nothing is not."""
+        import click
+
+        cmd = main.commands["discover"]
+        opt = next(p for p in cmd.params if p.name == "ids_file")
+        assert isinstance(opt.type, click.Path) and opt.type.exists

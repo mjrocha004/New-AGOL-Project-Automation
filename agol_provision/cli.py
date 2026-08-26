@@ -316,6 +316,9 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
               help="Template group id or title. Repeatable; the union is used.")
 @click.option("--ids", "ids_file", type=click.Path(exists=True),
               help="File of item ids, one per line. Combines with --group.")
+@click.option("--id", "extra_ids", multiple=True, metavar="ITEM_ID",
+              help="A single item id. Repeatable. For adding the master, which is "
+                   "often shared to no group.")
 @click.option("--query", help="AGOL search query, e.g. 'title:VSCLR Template'.")
 @click.option("--name", "manifest_name", default="vsclr-standard",
               help="Name for the generated manifest.")
@@ -327,7 +330,7 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
               help="Show which items matched, then stop. Writes no manifest.")
 @click.option("--save-ids", type=click.Path(), default=None,
               help="Write the matched ids to a reviewable file for pruning.")
-def discover(profile, group, ids_file, query, manifest_name, out, limit,
+def discover(profile, group, ids_file, extra_ids, query, manifest_name, out, limit,
              dry_run, save_ids) -> None:
     """Audit the template items and generate a manifest, snapshots, and a report.
 
@@ -349,13 +352,17 @@ def discover(profile, group, ids_file, query, manifest_name, out, limit,
         console.print(f"[yellow]Note:[/yellow] account cannot {', '.join(missing)}. "
                       f"Discovery is read-only, but provisioning will need these.")
 
-    item_ids = None
+    # --ids reads a file, --id takes ids directly; both feed the same union, so
+    # adding one stray item needs no file.
+    item_ids: list[str] = list(extra_ids)
     if ids_file:
-        item_ids = [ln.strip() for ln in Path(ids_file).read_text().splitlines() if ln.strip()]
+        item_ids += [ln.strip() for ln in Path(ids_file).read_text().splitlines() if ln.strip()]
 
     try:
         kwargs = {"limit": limit} if limit else {}
-        items = discovery.collect(gis, group=group, item_ids=item_ids, query=query, **kwargs)
+        items = discovery.collect(
+            gis, group=group, item_ids=item_ids or None, query=query, **kwargs
+        )
     except discovery.TruncatedError as exc:
         # Not a warning: a short template set yields a short manifest, and the
         # omission would not surface until an app opened with a missing layer.
@@ -389,7 +396,7 @@ def discover(profile, group, ids_file, query, manifest_name, out, limit,
                 "\n[yellow]No master feature service in this set.[/yellow] The master "
                 "is often shared to no group at all, so a group-based selector misses "
                 "it. Selectors combine -- add its id alongside the groups:\n"
-                "  [cyan]--ids master.txt[/cyan]"
+                "  [cyan]--id <32-character item id>[/cyan]"
             )
         elif masters > 1:
             console.print(

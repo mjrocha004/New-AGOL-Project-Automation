@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 227 tests pass, none needing network access.
+the master schema copies faithfully. 233 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -101,7 +101,7 @@ Three selectors, and **they combine**, deduplicated by item id:
 
 | Selector | Notes |
 | --- | --- |
-| `--group "Title or id"` | Repeatable. |
+| `--group "Title or id"` | Repeatable — pass it as many times as you need. |
 | `--ids file.txt` | One item id per line. |
 | `--query "title:VSCLR"` | AGOL search syntax. |
 

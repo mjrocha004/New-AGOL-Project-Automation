@@ -316,3 +316,31 @@ class TestCombinedSelectors:
     def test_error_mentions_that_selectors_combine(self):
         with pytest.raises(ValueError, match="combined"):
             collect(self._gis())
+
+
+class TestGroupCountIsUnbounded:
+    """Examples in the docs showed two or three groups, which reads as a cap.
+    There is none -- a template set spread across many role groups is fine.
+    """
+
+    def _gis(self, names):
+        gis = FakeGIS()
+        gis.groups = FakeMultiGroups(
+            {n: FakeGroup([FakeItem(_id(i))], n) for i, n in enumerate(names, start=1)}
+        )
+        return gis
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 8, 25])
+    def test_any_number_of_groups_is_accepted(self, count):
+        names = [f"Group{n}" for n in range(1, count + 1)]
+        assert len(collect(self._gis(names), group=names, limit=1000)) == count
+
+    def test_the_cli_option_declares_no_maximum(self):
+        import click
+
+        from agol_provision.cli import main
+
+        opt = next(p for p in main.commands["discover"].params if p.name == "group")
+        assert isinstance(opt, click.Option)
+        assert opt.multiple is True
+        assert opt.nargs == 1

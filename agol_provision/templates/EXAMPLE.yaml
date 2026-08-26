@@ -23,30 +23,37 @@ views:
     template_item_id: "00000000000000000000000000000002"
     title: "{base} - Design View"
     service_name: "{base_sn}_Design"
+    share_to: [contractor_group, qc_group]
   - key: redline
     template_item_id: "00000000000000000000000000000003"
     title: "{base} - Contractor / CX Redline View"
     service_name: "{base_sn}_Redline"
+    share_to: [contractor_group]
   - key: verified
     template_item_id: "00000000000000000000000000000004"
     title: "{base} - Verified Construction View"
     service_name: "{base_sn}_Verified"
+    share_to: [contractor_group]
   - key: qc
     template_item_id: "00000000000000000000000000000005"
     title: "{base} - QC View"
     service_name: "{base_sn}_QC"
+    share_to: [qc_group]
   - key: testing
     template_item_id: "00000000000000000000000000000006"
     title: "{base} - Testing View"
     service_name: "{base_sn}_Testing"
+    share_to: [contractor_group]
   - key: data_manager
     template_item_id: "00000000000000000000000000000007"
     title: "{base} - Data Manager View"
     service_name: "{base_sn}_DataManager"
+    share_to: [data_manager_group]
   - key: viewer
     template_item_id: "00000000000000000000000000000008"
     title: "{base} - Viewer View"
     service_name: "{base_sn}_Viewer"
+    share_to: [viewer_group]
 
 # `consumes` on a group documents which views it is meant to carry and gives
 # `verify` something to check. Sharing itself is driven by each item's `share_to`.

@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 269 tests pass, none needing network access.
+the master schema copies faithfully. 284 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -187,8 +187,12 @@ longest name and flags any duplicates.
 is actually shared to. The template groups are not a project's groups, but their
 shape is right: a view sitting in a contractor template group belongs in that
 project's contractor group. So the membership is real; edit the group *titles* to
-your project naming pattern. `preview` warns about any map or app with no
-`share_to`, which would be created and then shared to nothing.
+your project naming pattern.
+
+Views carry `share_to` too, and usually matter more than the maps and apps do —
+groups consume views, so an unshared view means a group whose members can see
+nothing. `preview` warns about anything with no `share_to`, and the manifest
+refuses to load if a group `consumes` an item that is not shared back to it.
 
 **Keys** are internal identifiers used in `consumes` and `share_to` and in run
 state. They only need to be unique and readable. Shorten them if you will be

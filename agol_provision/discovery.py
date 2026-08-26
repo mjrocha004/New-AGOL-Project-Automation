@@ -484,6 +484,15 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
         )
     master = masters[0]
 
+    # Derived first: group keys are reserved against the item keys, and the
+    # share_to lists below must use whatever keys this resolved to.
+    groups, group_key_by_title = _derive_groups(
+        inspected, prefix, taken={t.key for t in inspected}
+    )
+
+    def share_to(t: TemplateItem) -> list[str]:
+        return sorted({group_key_by_title[title] for _, title in t.groups})
+
     def refs(t: TemplateItem) -> list[str]:
         return [by_id[d].key for d in t.depends_on if d in by_id]
 
@@ -496,9 +505,12 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
             "template_item_id": master.item_id,
             "title": "{base}",
             "service_name": "{base_sn}",
+            # Usually empty: the master is typically shared to nothing, with the
+            # views carrying access instead.
+            "share_to": share_to(master),
         },
         "views": [],
-        "groups": _derive_groups(inspected, prefix),
+        "groups": groups,
         "maps": [],
         "apps": [],
     }
@@ -511,6 +523,9 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
                     "template_item_id": t.item_id,
                     "title": _title_pattern(t.title, prefix),
                     "service_name": _service_name_pattern(t.title, prefix),
+                    # Groups consume views, so this drives most of a project's
+                    # sharing. Read from how the template view is actually shared.
+                    "share_to": share_to(t),
                 }
             )
         elif t.role in ("map", "app"):
@@ -521,7 +536,7 @@ def build_manifest_dict(gis: GIS, inspected: list[TemplateItem], name: str) -> d
                     "item_type": t.item.type,
                     "title": _title_pattern(t.title, prefix),
                     "consumes": refs(t),
-                    "share_to": [_group_key(title) for _, title in t.groups],
+                    "share_to": share_to(t),
                 }
             )
     return manifest
@@ -676,7 +691,7 @@ def write_report(gis: GIS, inspected: list[TemplateItem], path: Path) -> None:
         "## Next steps",
         "",
         "1. Review the generated manifest -- shorten the suggested keys, check the title",
-        "   and service-name patterns, and fill in `share_to` for each map and app.",
+        "   and service-name patterns, and rename the proposed groups.",
         "2. Commit the snapshots. They are the version history for these templates.",
         "3. Run the Phase 0b spike to prove the master schema copies faithfully.",
         "",
@@ -744,7 +759,9 @@ def _group_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "group"
 
 
-def _derive_groups(inspected: list[TemplateItem], prefix: str) -> list[dict[str, Any]]:
+def _derive_groups(
+    inspected: list[TemplateItem], prefix: str, taken: set[str] | None = None
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Propose the groups section from how the templates are actually shared.
 
     The template groups are not the groups a project gets -- but their *shape* is
@@ -753,10 +770,33 @@ def _derive_groups(inspected: list[TemplateItem], prefix: str) -> list[dict[str,
     these are proposals: the titles need editing to the project naming pattern,
     but the membership is real rather than guessed.
     """
+    # Group keys are derived from group titles and item keys from item titles, so
+    # the two can collide -- a "QC" group and a "QC" view both slugify to "qc".
+    # Keys index run state and must be unique across the whole manifest, so the
+    # already-claimed item keys are reserved here.
+    claimed = set(taken or set())
+    resolved: dict[str, str] = {}  # group title -> manifest key
+
+    def key_for(title: str) -> str:
+        if title in resolved:
+            return resolved[title]
+        base = _group_key(title)
+        candidate = base
+        if candidate in claimed:
+            candidate = f"{base}_group"  # reads better than a numeric suffix
+        n = 2
+        while candidate in claimed:
+            candidate, n = f"{base}_group_{n}", n + 1
+        claimed.add(candidate)
+        resolved[title] = candidate
+        return candidate
+
+    # Returned alongside the groups so callers use the keys this actually resolved
+    # to, rather than re-deriving them and diverging on a collision.
     by_key: dict[str, dict[str, Any]] = {}
     for t in inspected:
         for _, title in t.groups:
-            key = _group_key(title)
+            key = key_for(title)
             entry = by_key.setdefault(
                 key,
                 {
@@ -769,4 +809,4 @@ def _derive_groups(inspected: list[TemplateItem], prefix: str) -> list[dict[str,
             # `consumes` documents which views a group carries; verify checks it.
             if t.role == "view" and t.key not in entry["consumes"]:
                 entry["consumes"].append(t.key)
-    return [by_key[k] for k in sorted(by_key)]
+    return [by_key[k] for k in sorted(by_key)], resolved

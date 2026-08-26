@@ -40,6 +40,7 @@ class MasterSpec(_Base):
     title: str = "{base}"
     service_name: str = "{base_sn}"
     key: str = "master"
+    share_to: list[str] = Field(default_factory=list)
 
     @field_validator("template_item_id")
     @classmethod
@@ -60,6 +61,9 @@ class ViewSpec(_Base):
     template_item_id: str
     title: str
     service_name: str
+    # Groups consume views, so this is the field that actually drives sharing for
+    # most of a project. Maps and apps carry the same field.
+    share_to: list[str] = Field(default_factory=list)
 
     @field_validator("template_item_id")
     @classmethod
@@ -159,6 +163,7 @@ class Manifest(_Base):
     def _validate_graph(self) -> Manifest:
         self._reject_duplicate_keys()
         self._reject_dangling_references()
+        self._reject_inconsistent_sharing()
         return self
 
     def _reject_duplicate_keys(self) -> None:
@@ -185,7 +190,7 @@ class Manifest(_Base):
         known = self.all_keys
         groups = self.group_keys
 
-        for spec in [*self.groups, *self.cloned_items]:
+        for spec in [*self.groups, *self.views, *self.cloned_items, self.master]:
             for ref in getattr(spec, "consumes", []):
                 if ref not in known:
                     raise ValueError(
@@ -197,6 +202,29 @@ class Manifest(_Base):
                     raise ValueError(
                         f"{spec.key!r} shares to {ref!r}, which is not a group in this "
                         f"manifest. Known groups: {', '.join(sorted(groups)) or '(none)'}"
+                    )
+
+
+    def _reject_inconsistent_sharing(self) -> None:
+        """A group's `consumes` and an item's `share_to` are two views of one fact.
+
+        If a group consumes a view but the view is not shared to that group, the
+        group is created and its members cannot see the layer it exists for --
+        which looks like a permissions problem long after provisioning.
+        """
+        shared_to: dict[str, set[str]] = {
+            spec.key: set(spec.share_to)
+            for spec in [self.master, *self.views, *self.maps, *self.apps]
+        }
+        for grp in self.groups:
+            for consumed in grp.consumes:
+                if consumed not in shared_to:
+                    continue  # dangling refs are reported separately
+                if grp.key not in shared_to[consumed]:
+                    raise ValueError(
+                        f"group {grp.key!r} consumes {consumed!r}, but {consumed!r} is "
+                        f"not shared to it. Add {grp.key!r} to that item's `share_to`, "
+                        f"or drop it from the group's `consumes`."
                     )
 
 
@@ -215,3 +243,8 @@ def load_manifest(path: str | Path) -> Manifest:
         return Manifest(**raw)
     except Exception as exc:
         raise ManifestError(f"{path} is invalid:\n{exc}") from exc
+
+
+def _shared_items(manifest: Manifest) -> list[Any]:
+    """Every spec carrying a `share_to` list."""
+    return [manifest.master, *manifest.views, *manifest.maps, *manifest.apps]

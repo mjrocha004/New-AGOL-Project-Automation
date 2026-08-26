@@ -540,7 +540,10 @@ def preview(manifest_path: str | None, company: str, location: str) -> None:
     console.print("[dim]Service names are permanent org-wide, even after deletion. "
                   "Titles can be changed later; these cannot.[/dim]")
 
-    ungrouped = [i.key for i in manifest.cloned_items if not i.share_to]
+    # Views are what groups consume, so an unshared view is the more consequential
+    # omission -- the group exists and its members see nothing.
+    ungrouped = [v.key for v in manifest.views if not v.share_to]
+    ungrouped += [i.key for i in manifest.cloned_items if not i.share_to]
     if ungrouped:
         console.print(f"\n[yellow]No share_to set for: {', '.join(ungrouped)}[/yellow] "
                       f"-- these would be created but shared to nothing.")

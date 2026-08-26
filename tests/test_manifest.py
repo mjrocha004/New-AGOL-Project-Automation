@@ -20,9 +20,11 @@ def minimal(**overrides) -> dict:
         "master": {"template_item_id": _id(1)},
         "views": [
             {"key": "design", "template_item_id": _id(2),
-             "title": "{base} - Design View", "service_name": "{base_sn}_Design"},
+             "title": "{base} - Design View", "service_name": "{base_sn}_Design",
+             "share_to": ["qc_group"]},
             {"key": "qc", "template_item_id": _id(3),
-             "title": "{base} - QC View", "service_name": "{base_sn}_QC"},
+             "title": "{base} - QC View", "service_name": "{base_sn}_QC",
+             "share_to": ["qc_group"]},
         ],
         "groups": [{"key": "qc_group", "title": "{base} - QC", "consumes": ["design", "qc"]}],
         "maps": [
@@ -125,3 +127,74 @@ class TestLoading:
         p.write_text(yaml.safe_dump(bad))
         with pytest.raises(ManifestError, match="is invalid"):
             load_manifest(p)
+
+
+class TestViewSharing:
+    """Groups consume views, so views are what most of a project's sharing acts on.
+    A view without share_to would be created and then shared to nothing.
+    """
+
+    def test_views_carry_share_to(self):
+        m = Manifest(**minimal())
+        assert next(v for v in m.views if v.key == "design").share_to == ["qc_group"]
+
+    def test_master_carries_share_to(self):
+        """Usually empty -- the master is typically shared to nothing -- but the
+        field has to exist for discovery to record what it finds."""
+        assert Manifest(**minimal()).master.share_to == []
+
+    def test_share_to_defaults_to_empty(self):
+        cfg = minimal()
+        del cfg["views"][0]["share_to"]
+        cfg["groups"][0]["consumes"] = ["qc"]
+        assert Manifest(**cfg).views[0].share_to == []
+
+    def test_a_view_cannot_share_to_a_non_group(self):
+        cfg = minimal()
+        cfg["views"][0]["share_to"] = ["qc"]  # a view, not a group
+        with pytest.raises(Exception, match="not a group"):
+            Manifest(**cfg)
+
+
+class TestSharingConsistency:
+    """`group.consumes` and `item.share_to` are two views of one fact. When they
+    disagree the group is created and its members cannot see the layer it exists
+    for -- which surfaces as a permissions complaint weeks later.
+    """
+
+    def test_group_consuming_an_unshared_view_is_rejected(self):
+        cfg = minimal()
+        cfg["views"][0]["share_to"] = []          # design no longer shared
+        cfg["groups"][0]["consumes"] = ["design"]  # but the group still consumes it
+        with pytest.raises(Exception, match="is not shared to it"):
+            Manifest(**cfg)
+
+    def test_error_names_both_ways_to_fix_it(self):
+        cfg = minimal()
+        cfg["views"][0]["share_to"] = []
+        cfg["groups"][0]["consumes"] = ["design"]
+        with pytest.raises(Exception) as exc:
+            Manifest(**cfg)
+        assert "share_to" in str(exc.value) and "consumes" in str(exc.value)
+
+    def test_consistent_manifest_passes(self):
+        cfg = minimal()
+        cfg["groups"][0]["consumes"] = ["design", "qc"]
+        cfg["views"][0]["share_to"] = ["qc_group"]
+        cfg["views"][1]["share_to"] = ["qc_group"]
+        assert Manifest(**cfg).groups[0].consumes == ["design", "qc"]
+
+    def test_a_map_consumed_by_a_group_must_also_be_shared(self):
+        cfg = minimal()
+        cfg["groups"][0]["consumes"] = ["qc_map"]
+        cfg["maps"][0]["share_to"] = []
+        with pytest.raises(Exception, match="is not shared to it"):
+            Manifest(**cfg)
+
+    def test_sharing_beyond_what_a_group_consumes_is_allowed(self):
+        """Sharing more than a group formally 'consumes' is not an error."""
+        cfg = minimal()
+        cfg["groups"][0]["consumes"] = ["design"]
+        cfg["views"][0]["share_to"] = ["qc_group"]
+        cfg["views"][1]["share_to"] = ["qc_group"]  # qc shared but not consumed
+        assert Manifest(**cfg)

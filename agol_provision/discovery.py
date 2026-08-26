@@ -109,7 +109,7 @@ def count_matches(gis: GIS, query: str) -> int | None:
 def collect(
     gis: GIS,
     *,
-    group: str | None = None,
+    group: str | list[str] | tuple[str, ...] | None = None,
     item_ids: list[str] | None = None,
     query: str | None = None,
     limit: int = DEFAULT_SEARCH_LIMIT,
@@ -135,20 +135,15 @@ def collect(
         return found
 
     if group:
-        grp = gis.groups.get(group)
-        if grp is None:
-            matches = gis.groups.search(f'title:"{group}"')
-            if not matches:
-                raise ValueError(f"No group matching {group!r} is visible to this account.")
-            grp = matches[0]
-        items = list(grp.content(max_items=limit))
-        if len(items) >= limit:
-            raise TruncatedError(
-                f"Group {grp.title!r} returned {len(items)} items, which is the "
-                f"requested limit -- there are probably more. Re-run with a higher "
-                f"--limit."
-            )
-        return items
+        # Template sets are commonly spread across several groups -- one per
+        # consuming role -- so several may be given. The union is deduplicated by
+        # item id, since an item shared to two groups is still one item.
+        names = [group] if isinstance(group, str) else list(group)
+        seen: dict[str, Item] = {}
+        for name in names:
+            for item in _group_content(gis, name, limit):
+                seen.setdefault(item.itemid, item)
+        return list(seen.values())
 
     if query:
         if limit > SEARCH_CEILING:
@@ -680,3 +675,21 @@ def write_report(gis: GIS, inspected: list[TemplateItem], path: Path) -> None:
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines))
+
+
+def _group_content(gis: GIS, name: str, limit: int) -> list[Item]:
+    """Items shared to one group, resolved by id or title."""
+    grp = gis.groups.get(name)
+    if grp is None:
+        matches = gis.groups.search(f'title:"{name}"')
+        if not matches:
+            raise ValueError(f"No group matching {name!r} is visible to this account.")
+        grp = matches[0]
+
+    items = list(grp.content(max_items=limit))
+    if len(items) >= limit:
+        raise TruncatedError(
+            f"Group {grp.title!r} returned {len(items)} items, which is the requested "
+            f"limit -- there are probably more. Re-run with a higher --limit."
+        )
+    return items

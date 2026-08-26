@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 195 tests pass, none needing network access.
+the master schema copies faithfully. 200 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -85,6 +85,14 @@ distinguishes a template from a real project except your intent.
 
 Three selectors: `--group` (id or title), `--query` (AGOL search), or `--ids`
 (explicit list, one item id per line).
+
+`--group` is repeatable, and the union is used with duplicates removed. Template
+sets are commonly spread across several groups — one per consuming role — so this
+works today without consolidating them first:
+
+```bat
+python -m agol_provision.cli discover --group "Contractor Templates" --group "QC Templates" --dry-run
+```
 
 **Recommended: keep all templates in one AGOL group.** Then the selector is
 `--group "AGOL Templates"` forever, adding a template is one share action, and the

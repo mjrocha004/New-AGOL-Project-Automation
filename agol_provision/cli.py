@@ -316,7 +316,8 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
 @main.command()
 @click.option("--profile", default="home", show_default=True,
               help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
-@click.option("--group", help="Template group id or title to read items from.")
+@click.option("--group", multiple=True,
+              help="Template group id or title. Repeatable; the union is used.")
 @click.option("--ids", "ids_file", type=click.Path(exists=True),
               help="File with one template item id per line.")
 @click.option("--query", help="AGOL search query, e.g. 'title:VSCLR Template'.")
@@ -369,7 +370,10 @@ def discover(profile, group, ids_file, query, manifest_name, out, limit, dry_run
     if dry_run:
         # Confirming the selector is cheap; inspecting every item is not. Stop here
         # so the selector can be tuned without reading 21 items' worth of JSON.
-        table = Table(title=f"Would inspect {len(items)} item(s)")
+        title = f"Would inspect {len(items)} item(s)"
+        if len(group) > 1:
+            title += f" (union of {len(group)} groups)"
+        table = Table(title=title)
         for col in ("Title", "Type", "Role", "Id"):
             table.add_column(col, overflow="fold")
         for it in items:
@@ -385,6 +389,9 @@ def discover(profile, group, ids_file, query, manifest_name, out, limit, dry_run
                           "(a Feature Service without the 'View Service' keyword).[/yellow]")
         console.print("\n[dim]Looks right? Re-run without --dry-run.[/dim]")
         return
+
+    if len(group) > 1:
+        console.print(f"Union of {len(group)} groups: {len(items)} distinct item(s).")
 
     console.print(f"Inspecting {len(items)} item(s)...")
     inspected = discovery.inspect_all(gis, items)

@@ -146,3 +146,61 @@ class TestDefaults:
     def test_default_does_not_truncate_a_52_item_org(self):
         gis = FakeGIS(content=FakeContent(items(52), count=52))
         assert len(collect(gis, query="title:VSCLR")) == 52
+
+
+class FakeMultiGroups:
+    """Resolves several groups by title, the way GroupManager.get does."""
+
+    def __init__(self, groups_by_name):
+        self._by_name = groups_by_name
+
+    def get(self, name):
+        return self._by_name.get(name)
+
+    def search(self, query):
+        return []
+
+
+class TestMultipleGroups:
+    """A template set is commonly spread across several groups -- one per consuming
+    role -- so the union of them is the real template list."""
+
+    def _gis(self, mapping):
+        gis = FakeGIS()
+        gis.groups = FakeMultiGroups(mapping)
+        return gis
+
+    def test_unions_items_across_groups(self):
+        gis = self._gis({
+            "Contractor": FakeGroup(items(3)[:3], "Contractor"),
+            "QC": FakeGroup([FakeItem(_id(10)), FakeItem(_id(11))], "QC"),
+        })
+        got = collect(gis, group=["Contractor", "QC"], limit=1000)
+        assert len(got) == 5
+
+    def test_deduplicates_items_shared_to_several_groups(self):
+        """The Design view is shared to both Contractor and QC; it is one item."""
+        shared = FakeItem(_id(1))
+        gis = self._gis({
+            "Contractor": FakeGroup([shared, FakeItem(_id(2))], "Contractor"),
+            "QC": FakeGroup([shared, FakeItem(_id(3))], "QC"),
+        })
+        got = collect(gis, group=["Contractor", "QC"], limit=1000)
+        assert [i.itemid for i in got] == [_id(1), _id(2), _id(3)]
+
+    def test_a_single_group_string_still_works(self):
+        gis = self._gis({"Templates": FakeGroup(items(21), "Templates")})
+        assert len(collect(gis, group="Templates", limit=1000)) == 21
+
+    def test_unknown_group_names_the_offender(self):
+        gis = self._gis({"Contractor": FakeGroup(items(2), "Contractor")})
+        with pytest.raises(ValueError, match="Typo"):
+            collect(gis, group=["Contractor", "Typo"], limit=1000)
+
+    def test_truncation_in_any_one_group_still_raises(self):
+        gis = self._gis({
+            "Contractor": FakeGroup(items(2), "Contractor"),
+            "QC": FakeGroup(items(60), "QC"),
+        })
+        with pytest.raises(TruncatedError, match="QC"):
+            collect(gis, group=["Contractor", "QC"], limit=50)

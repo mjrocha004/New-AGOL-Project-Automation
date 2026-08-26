@@ -297,13 +297,9 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
             _fail("Refusing to write a partial id list.")
 
     if save_ids:
-        out = Path(save_ids)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        # One id per line, the format `discover --ids` reads. Titles go in trailing
-        # comments so the file stays reviewable; collect() strips them.
-        out.write_text(
-            "\n".join(f"{it.itemid}  # {it.title}" for it in items) + "\n"
-        )
+        from agol_provision.discovery import write_id_file
+
+        write_id_file(items, Path(save_ids))
         console.print(f"\n[green]Wrote {len(items)} id(s)[/green] to {save_ids}")
         console.print("[dim]Edit the file to add or remove items, then:\n"
                       f"  python -m agol_provision.cli discover --ids {save_ids} "
@@ -328,8 +324,11 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
 @click.option("--limit", default=None, type=int,
               help="Maximum items to retrieve. Raise it if a run reports truncation.")
 @click.option("--dry-run", is_flag=True,
-              help="Show which items matched, then stop. Writes nothing.")
-def discover(profile, group, ids_file, query, manifest_name, out, limit, dry_run) -> None:
+              help="Show which items matched, then stop. Writes no manifest.")
+@click.option("--save-ids", type=click.Path(), default=None,
+              help="Write the matched ids to a reviewable file for pruning.")
+def discover(profile, group, ids_file, query, manifest_name, out, limit,
+             dry_run, save_ids) -> None:
     """Audit the template items and generate a manifest, snapshots, and a report.
 
     Read-only: this command never writes to ArcGIS Online.

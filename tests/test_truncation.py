@@ -204,3 +204,60 @@ class TestMultipleGroups:
         })
         with pytest.raises(TruncatedError, match="QC"):
             collect(gis, group=["Contractor", "QC"], limit=50)
+
+
+class TestIdFileRoundTrip:
+    """A group union is a superset -- those groups carry real project content too.
+    The workflow is dump, prune by hand, re-run against the pruned file, so what
+    write_id_file emits must be exactly what collect() accepts back.
+    """
+
+    def _write(self, tmp_path, items_):
+        from agol_provision.discovery import write_id_file
+
+        path = tmp_path / "ids.txt"
+        write_id_file(items_, path)
+        return path
+
+    def test_written_file_is_readable_back(self, tmp_path):
+        from agol_provision.discovery import collect
+
+        originals = items(5)
+        path = self._write(tmp_path, originals)
+        known = {i.itemid: i for i in originals}
+
+        gis = FakeGIS()
+        gis.content = type("C", (), {"get": lambda self, iid: known.get(iid)})()
+        lines = path.read_text().splitlines()
+        assert len(collect(gis, item_ids=lines)) == 5
+
+    def test_pruning_lines_reduces_the_set(self, tmp_path):
+        """Deleting a line must actually drop that item, not error."""
+        from agol_provision.discovery import collect
+
+        originals = items(5)
+        path = self._write(tmp_path, originals)
+        known = {i.itemid: i for i in originals}
+
+        kept = [ln for ln in path.read_text().splitlines()
+                if not ln.strip().startswith("#") and ln.strip()][:2]
+
+        gis = FakeGIS()
+        gis.content = type("C", (), {"get": lambda self, iid: known.get(iid)})()
+        assert len(collect(gis, item_ids=kept)) == 2
+
+    def test_file_carries_role_and_title_for_review(self, tmp_path):
+        path = self._write(tmp_path, items(2))
+        body = path.read_text()
+        assert "# [" in body        # role tag
+        assert "Item" in body       # title
+        assert "--ids" in body      # the next command to run
+
+    def test_header_comments_do_not_become_ids(self, tmp_path):
+        from agol_provision.discovery import collect
+
+        path = self._write(tmp_path, items(2))
+        gis = FakeGIS()
+        gis.content = type("C", (), {"get": lambda self, iid: FakeItem(iid)})()
+        # Header lines start with '#'; none should reach content.get().
+        assert len(collect(gis, item_ids=path.read_text().splitlines())) == 2

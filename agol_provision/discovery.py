@@ -693,3 +693,24 @@ def _group_content(gis: GIS, name: str, limit: int) -> list[Item]:
             f"limit -- there are probably more. Re-run with a higher --limit."
         )
     return items
+
+
+def write_id_file(items: list[Item], path: Path) -> int:
+    """Write a reviewable id list: one id per line, role and title as a comment.
+
+    A group union is usually a superset -- those groups carry real project content
+    too -- so the practical workflow is to dump the candidates, delete the lines
+    that are not templates, and re-run against the pruned file. The role tag makes
+    the 21 that matter easy to pick out, and `collect()` ignores everything from
+    the `#` onward.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Delete any line that is not a template, then run:",
+        f"#   python -m agol_provision.cli discover --ids {path.name} --dry-run",
+        "",
+    ]
+    for item in sorted(items, key=lambda i: (classify(i), (i.title or "").lower())):
+        lines.append(f"{item.itemid}  # [{classify(item):<7}] {item.title}")
+    path.write_text("\n".join(lines) + "\n")
+    return len(items)

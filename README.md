@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 200 tests pass, none needing network access.
+the master schema copies faithfully. 204 tests pass, none needing network access.
 
 Nothing has run against a real ArcGIS Online organization yet. The provisioning
 stages come next and are deliberately blocked on what Phase 0 reports.
@@ -92,6 +92,21 @@ works today without consolidating them first:
 
 ```bat
 python -m agol_provision.cli discover --group "Contractor Templates" --group "QC Templates" --dry-run
+```
+
+Those groups usually carry real project content as well, so the union is a
+superset. Dump it, prune it by hand, and run from the pruned file:
+
+```bat
+python -m agol_provision.cli discover --group "A" --group "B" --dry-run --save-ids ids.txt
+```
+
+`ids.txt` lists one id per line, sorted by role, with the title as a comment —
+delete the lines that are not templates, then:
+
+```bat
+python -m agol_provision.cli discover --ids ids.txt --dry-run
+python -m agol_provision.cli discover --ids ids.txt
 ```
 
 **Recommended: keep all templates in one AGOL group.** Then the selector is

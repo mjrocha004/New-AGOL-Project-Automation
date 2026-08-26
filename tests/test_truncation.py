@@ -261,3 +261,58 @@ class TestIdFileRoundTrip:
         gis.content = type("C", (), {"get": lambda self, iid: FakeItem(iid)})()
         # Header lines start with '#'; none should reach content.get().
         assert len(collect(gis, item_ids=path.read_text().splitlines())) == 2
+
+
+class TestCombinedSelectors:
+    """The master feature service is often shared to no group at all, so the real
+    selector is "these groups, plus this one item". Selectors union rather than
+    being alternatives.
+    """
+
+    def _gis(self, groups=None, known=None):
+        gis = FakeGIS()
+        gis.groups = FakeMultiGroups(groups or {})
+        store = known or {}
+        gis.content = type("C", (), {
+            "get": lambda self, iid: store.get(iid),
+            "search": lambda self, q, max_items=None, **kw: [],
+            "advanced_search": lambda self, q, return_count=False, **kw: 0,
+        })()
+        return gis
+
+    def test_group_plus_explicit_id(self):
+        master = FakeItem(_id(99))
+        gis = self._gis(
+            groups={"QC": FakeGroup(items(3), "QC")},
+            known={_id(99): master},
+        )
+        got = collect(gis, group=["QC"], item_ids=[_id(99)], limit=1000)
+        assert len(got) == 4
+        assert _id(99) in {i.itemid for i in got}
+
+    def test_an_item_reached_twice_appears_once(self):
+        shared = FakeItem(_id(1))
+        gis = self._gis(
+            groups={"QC": FakeGroup([shared], "QC")},
+            known={_id(1): shared},
+        )
+        got = collect(gis, group=["QC"], item_ids=[_id(1)], limit=1000)
+        assert len(got) == 1
+
+    def test_explicit_ids_come_first(self):
+        """The master is what you add by hand; it should lead the list."""
+        master = FakeItem(_id(99))
+        gis = self._gis(
+            groups={"QC": FakeGroup(items(2), "QC")},
+            known={_id(99): master},
+        )
+        got = collect(gis, group=["QC"], item_ids=[_id(99)], limit=1000)
+        assert got[0].itemid == _id(99)
+
+    def test_no_selector_at_all_is_an_error(self):
+        with pytest.raises(ValueError, match="at least one"):
+            collect(self._gis())
+
+    def test_error_mentions_that_selectors_combine(self):
+        with pytest.raises(ValueError, match="combined"):
+            collect(self._gis())

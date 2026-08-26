@@ -114,57 +114,65 @@ def collect(
     query: str | None = None,
     limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> list[Item]:
-    """Gather the template items by group, explicit id list, or search query.
+    """Gather the template items from any combination of selectors.
+
+    Ids, groups, and a query are unioned rather than being alternatives. That
+    matters in practice: a template set spread across role groups usually misses
+    the master feature service, which is often shared to nothing at all, so the
+    real selector is "these groups, plus this one item".
 
     Raises TruncatedError rather than returning a partial set: an incomplete
     manifest would provision an incomplete project, and the omission would not
     surface until someone opened an app with a missing layer.
     """
-    if item_ids:
-        found = []
-        for raw in item_ids:
-            # Id files are meant to be hand-edited, so tolerate "# title" comments
-            # and blank lines rather than sending them to the API as ids.
-            iid = raw.split("#", 1)[0].strip()
-            if not iid:
-                continue
-            it = gis.content.get(iid)
-            if it is None:
-                raise ValueError(f"No item with id {iid!r} is visible to this account.")
-            found.append(it)
-        return found
+    if not (item_ids or group or query):
+        raise ValueError(
+            "Provide at least one of --ids, --group, or --query to locate the "
+            "templates. They can be combined."
+        )
+
+    # Insertion-ordered, deduplicated by item id: an item reached through two
+    # selectors is still one item.
+    found: dict[str, Item] = {}
+
+    for raw in item_ids or []:
+        # Id files are meant to be hand-edited, so tolerate "# title" comments
+        # and blank lines rather than sending them to the API as ids.
+        iid = raw.split("#", 1)[0].strip()
+        if not iid:
+            continue
+        item = gis.content.get(iid)
+        if item is None:
+            raise ValueError(f"No item with id {iid!r} is visible to this account.")
+        found.setdefault(item.itemid, item)
 
     if group:
-        # Template sets are commonly spread across several groups -- one per
-        # consuming role -- so several may be given. The union is deduplicated by
-        # item id, since an item shared to two groups is still one item.
         names = [group] if isinstance(group, str) else list(group)
-        seen: dict[str, Item] = {}
         for name in names:
             for item in _group_content(gis, name, limit):
-                seen.setdefault(item.itemid, item)
-        return list(seen.values())
+                found.setdefault(item.itemid, item)
 
     if query:
         if limit > SEARCH_CEILING:
             raise ValueError(f"AGOL caps search at {SEARCH_CEILING:,} items.")
-        items = list(gis.content.search(query, max_items=limit))
+        matches = list(gis.content.search(query, max_items=limit))
 
         total = count_matches(gis, query)
-        if total is not None and total > len(items):
+        if total is not None and total > len(matches):
             raise TruncatedError(
-                f"{query!r} matches {total} items but only {len(items)} were "
+                f"{query!r} matches {total} items but only {len(matches)} were "
                 f"retrieved. Re-run with --limit {total + 10}, or narrow the query."
             )
-        if total is None and len(items) >= limit:
+        if total is None and len(matches) >= limit:
             # No exact count available; hitting the limit exactly is the tell.
             raise TruncatedError(
-                f"{query!r} returned {len(items)} items, which is the requested "
+                f"{query!r} returned {len(matches)} items, which is the requested "
                 f"limit -- there are probably more. Re-run with a higher --limit."
             )
-        return items
+        for item in matches:
+            found.setdefault(item.itemid, item)
 
-    raise ValueError("Provide one of --group, --ids, or --query to locate the templates.")
+    return list(found.values())
 
 
 def classify(item: Item) -> str:

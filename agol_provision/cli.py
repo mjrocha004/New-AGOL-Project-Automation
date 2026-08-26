@@ -315,7 +315,7 @@ def list_content(profile: str, query: str, limit: int, save_ids: str | None) -> 
 @click.option("--group", multiple=True,
               help="Template group id or title. Repeatable; the union is used.")
 @click.option("--ids", "ids_file", type=click.Path(exists=True),
-              help="File with one template item id per line.")
+              help="File of item ids, one per line. Combines with --group.")
 @click.option("--query", help="AGOL search query, e.g. 'title:VSCLR Template'.")
 @click.option("--name", "manifest_name", default="vsclr-standard",
               help="Name for the generated manifest.")
@@ -383,10 +383,30 @@ def discover(profile, group, ids_file, query, manifest_name, out, limit,
         console.print(f"\nmaster: {roles.count('master')}  views: {roles.count('view')}  "
                       f"maps: {roles.count('map')}  apps: {roles.count('app')}  "
                       f"unknown: {roles.count('unknown')}")
-        if roles.count("master") != 1:
-            console.print("[yellow]Expected exactly one master feature service "
-                          "(a Feature Service without the 'View Service' keyword).[/yellow]")
-        console.print("\n[dim]Looks right? Re-run without --dry-run.[/dim]")
+        masters = roles.count("master")
+        if masters == 0:
+            console.print(
+                "\n[yellow]No master feature service in this set.[/yellow] The master "
+                "is often shared to no group at all, so a group-based selector misses "
+                "it. Selectors combine -- add its id alongside the groups:\n"
+                "  [cyan]--ids master.txt[/cyan]"
+            )
+        elif masters > 1:
+            console.print(
+                f"\n[yellow]{masters} candidate master feature services.[/yellow] "
+                "Expected exactly one -- a Feature Service without the 'View Service' "
+                "type keyword. The selector is probably catching real project content."
+            )
+
+        if save_ids:
+            written = discovery.write_id_file(items, Path(save_ids))
+            console.print(f"\n[green]Wrote {written} id(s)[/green] to {save_ids}")
+            console.print("[dim]Delete the lines that are not templates, then:\n"
+                          f"  python -m agol_provision.cli discover --ids {save_ids} "
+                          f"--dry-run[/dim]")
+        else:
+            console.print("\n[dim]Looks right? Re-run without --dry-run. "
+                          "Too many items? Add --save-ids ids.txt to prune.[/dim]")
         return
 
     if len(group) > 1:

@@ -23,17 +23,15 @@ stage carries nearly all the value and none of the clone/remap risk. The plan
 anticipated this split in its Scope note. `share_to` stays in the manifest,
 unused, until the groups stage exists.
 
-Two design forks depend on artifacts only a run against the real org can produce.
-One is now resolved:
+**Both design forks are now closed** by runs against the real org:
 
-| Artifact | Decides | State |
-| --- | --- | --- |
-| `docs/discovery-report.md` | Whether views filter uniformly across layers | **Generated.** 2 of the 7 views (`redline_qc_view_editable`, `cx_redline_edit_view`) use a different query per layer, so per-layer `update_definition()` after `create_view()` is required, not optional. |
-| `docs/spike-master-copy.md` | Whether the master copies faithfully, or needs a publish-from-FGDB fallback | **Not generated.** `spike-master` crashed on every run until the fix below; it has not yet been re-run against the org. |
+| Artifact | Decided |
+| --- | --- |
+| `docs/discovery-report.md` | 2 of the 7 views (`redline_qc_view_editable`, `cx_redline_edit_view`) use a different query per layer, so per-layer `update_definition()` after `create_view()` is required. Field visibility is uniform across all seven and no view hides a field, so `visible_fields` is not needed at all. |
+| `docs/spike-master-copy.md` | `USABLE WITH FIXUPS`, **no critical differences**. All 17 layers, 1 table, every field and type, 47 domains, attachments, and editor tracking survive `copy_feature_layer_collection()`. No FGDB fallback is needed. The only real loss is 10 user-defined indexes — `build_status_Index` on 9 layers and `I25bore_depth` on 1 — which stage 1 must reapply. The other 73 reported differences are system-generated index names that could never match. |
 
-Both are generated into `docs/` on the Windows machine and are not committed. If
-`spike-master-copy.md` has not been pasted into the session, the master strategy
-is still undecided — do not guess which fork applies, ask.
+`docs/phase-2-master-and-views.md` is the spec for the next work. Neither
+generated report is committed; both are produced on the Windows machine.
 
 ## Commands
 

@@ -23,7 +23,10 @@
 > | Artifact | Fork | State |
 > | --- | --- | --- |
 > | `docs/discovery-report.md` | Uniform vs per-layer view configuration | **Resolved.** 2 of the 7 views use a different definition query per layer, so per-layer `update_definition()` after `create_view()` is required, not a contingency. |
-> | `docs/spike-master-copy.md` | `copy_feature_layer_collection()` vs publish-from-FGDB | **Open.** The command raised `ValueError: An index of layers or tables must be provided` on every run; fixed, but not yet re-run against the org. |
+> | `docs/spike-master-copy.md` | `copy_feature_layer_collection()` vs publish-from-FGDB | **Resolved.** `USABLE WITH FIXUPS`, no critical differences — layers, tables, fields, types, all 47 domains, attachments and editor tracking survive. **`copy_feature_layer_collection()` is the master strategy; the FGDB fallback is not needed.** The only real loss is 10 user-defined indexes (`build_status_Index` on 9 layers, `I25bore_depth` on 1), which stage 1 reapplies. The other 73 reported index differences are system-generated names that could never match by name. |
+>
+> **The stage 0-2 spec is `docs/phase-2-master-and-views.md`.** It supersedes the
+> Stage 0-2 sketches below, which stay as the original reasoning.
 >
 > ### Decisions that changed since this plan was written
 >

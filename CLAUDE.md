@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Python CLI that provisions a complete ArcGIS Online project from templates —
-one master feature service, 7 views, 4 groups, 4 web maps, 5 Experience Builder
+one master feature service, 7 views, 4 groups, 4 web maps, 4 Experience Builder
 apps, and a dashboard (21 items), all named from `COMPANY LOCATION` and wired to
 each other. See `README.md` for the user-facing setup and `docs/implementation-plan.md`
 for the phased plan and the reasoning behind the architecture.
@@ -13,22 +13,37 @@ for the phased plan and the reasoning behind the architecture.
 ## Status and what is blocked
 
 Phase 0 (discovery + master-copy spike) and the core modules are built. **The
-provisioning stages are deliberately not started.** Two design forks depend on
-artifacts that only a run against the real org can produce:
+provisioning stages are deliberately not started.** `docs/implementation-plan.md`
+holds the phased plan and the reasoning.
 
-| Artifact | Decides |
-| --- | --- |
-| `docs/spike-master-copy.md` | Whether the master copies faithfully, or needs a publish-from-FGDB fallback |
-| `docs/discovery-report.md` | Whether views filter uniformly across layers, or need per-layer `update_definition()` |
+**Next work is Phase 2, stages 0-2 only** — preflight, master, views. Stages 3-6
+(groups, maps, apps, sharing) are deferred at the user's request: creating four
+groups by hand takes a minute, creating seven views takes a day, so the views
+stage carries nearly all the value and none of the clone/remap risk. The plan
+anticipated this split in its Scope note. `share_to` stays in the manifest,
+unused, until the groups stage exists.
 
-If those files do not exist yet, they have not been generated. Do not build the
-master or views stages by guessing which fork applies — ask.
+Two design forks depend on artifacts only a run against the real org can produce.
+One is now resolved:
+
+| Artifact | Decides | State |
+| --- | --- | --- |
+| `docs/discovery-report.md` | Whether views filter uniformly across layers | **Generated.** 2 of the 7 views (`redline_qc_view_editable`, `cx_redline_edit_view`) use a different query per layer, so per-layer `update_definition()` after `create_view()` is required, not optional. |
+| `docs/spike-master-copy.md` | Whether the master copies faithfully, or needs a publish-from-FGDB fallback | **Not generated.** `spike-master` crashed on every run until the fix below; it has not yet been re-run against the org. |
+
+Both are generated into `docs/` on the Windows machine and are not committed. If
+`spike-master-copy.md` has not been pasted into the session, the master strategy
+is still undecided — do not guess which fork applies, ask.
 
 ## Commands
 
+Local development (macOS, no arcpy) uses uv. Live runs against ArcGIS Online
+happen on Windows in ArcGIS Pro's own Python, which has no uv and no venv — see
+below.
+
 ```bash
 uv sync --group dev          # build the environment
-uv run pytest                # all tests (~290, no network required)
+uv run pytest                # all tests (288, no network required)
 uv run pytest tests/test_naming.py::TestSanitizeServiceName -x
 uv run agol-provision --help
 ```
@@ -109,6 +124,46 @@ rather than an error:
 - **`--profile home` requires ArcGIS Pro's Python**, because it reads the sign-in
   token through `arcpy`. It cannot work from a standalone venv — use a stored
   profile there.
+- **`copy_feature_layer_collection()` copies nothing by default.** It selects a
+  *subset*, so called with both `layers` and `tables` left as `None` it raises
+  rather than copying everything. The values it selects with are **positional
+  indexes** into `Item.layers` / `Item.tables` — it evaluates `self.layers[idx]`
+  — not layer ids. The master's 17 layers carry ids running to 19, so passing ids
+  indexes off the end of the list: a plausible-looking fix that fails differently.
+  `copy_whole_service()` in `cli.py` wraps this and `tests/test_spike_copy.py`
+  pins both behaviours. The method also strips each layer's `indexes` before
+  applying the definition, so a schema diff is *expected* to report index
+  differences — that is the method's doing, not the template's, and should not be
+  read as the master failing to copy.
+
+## Known gaps
+
+Real, understood, not yet fixed. Each has already produced a wrong answer once.
+
+- **Discovery silently discards references to items outside the inventory.**
+  `find_dependencies()` filters the ids it finds down to `known_ids`, so an app
+  pointing at a map that is not in `ids.txt` is reported as having *no*
+  dependencies — indistinguishable from genuinely standing alone. Two Experience
+  Builder apps were flagged this way and only one truly stood alone. Referenced
+  ids that are not in the inventory should be reported, not dropped.
+- **`_common_title_prefix()` can leak the template's location into every
+  pattern.** It takes the longest prefix shared by *all* titles, so a single
+  oddly-named template collapses the stem: templates titled `Zayo Chicago …` plus
+  one `Zayo CX Field Map` yield the stem `Zayo `, and every generated title and
+  service name keeps the word `Chicago`. Always read `preview` output before a
+  run — service names are reserved org-wide permanently.
+- **`Manifest.cloned_items` is `[*maps, *apps]` with no topological sort.** An app
+  that consumes another app — the Project Viewer ExB consumes the Summary
+  dashboard — can be ordered ahead of its own dependency. Must be fixed before
+  stage 4.
+
+## Not in the manifest, on purpose
+
+Some feature services and views are shared across *all* projects rather than
+recreated per project. They belong in neither `views:` nor `maps:`: they are
+created once, by hand, and reused. `remap_data()` only rewrites ids present in
+its mapping, so leaving them out is what makes cloned maps keep pointing at them.
+The manifest describes what a project **creates**, not everything it touches.
 
 ## Verifying app rewiring
 

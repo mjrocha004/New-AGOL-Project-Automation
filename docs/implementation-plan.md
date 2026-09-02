@@ -1,20 +1,29 @@
 <!-- Copied from the plan approved in the session that started this repo. Kept in
      version control so the reasoning travels with the code. Phases 0 and 1 are
-     built; Phase 2 is blocked on the two Phase 0 artifacts. See CLAUDE.md. -->
+     built. Phase 2 is being built in stage order, starting with stages 0-2
+     (preflight, master, views); stages 3-6 are deferred. See CLAUDE.md. -->
 
 # AGOL Project Provisioning Automation
 
 > ## STATUS — updated after Phase 0 was built
 >
-> **Phase 0 and Phase 1 are built and committed.** 284 tests pass. Nothing has run
-> against the real ArcGIS Online organization yet.
+> **Phase 0 and Phase 1 are built and committed.** 288 tests pass. `discover` has
+> now been run against the real organization; `spike-master` has not yet
+> completed one.
 >
-> **Phase 2 is deliberately not started.** It is blocked on two artifacts Martin
-> generates by running Phase 0 against the real org:
-> `docs/discovery-report.md` and `docs/spike-master-copy.md`. Two design forks
-> depend on them — whether `copy_feature_layer_collection()` preserves the master
-> schema or a publish-from-FGDB fallback is needed, and whether the views filter
-> uniformly across layers or need per-layer `update_definition()` calls.
+> **Phase 2 is being built in stage order, starting with stages 0-2** — preflight,
+> master, views — and stopping there. Stages 3-6 (groups, maps, apps, sharing) are
+> deferred: creating the four groups by hand takes a minute, creating the seven
+> views takes a day, so stage 2 carries nearly all the time saving and none of the
+> clone/remap risk. This is the split the Scope note at the foot of this document
+> already anticipated, taken deliberately rather than by drift.
+>
+> Of the two design forks, one is resolved:
+>
+> | Artifact | Fork | State |
+> | --- | --- | --- |
+> | `docs/discovery-report.md` | Uniform vs per-layer view configuration | **Resolved.** 2 of the 7 views use a different definition query per layer, so per-layer `update_definition()` after `create_view()` is required, not a contingency. |
+> | `docs/spike-master-copy.md` | `copy_feature_layer_collection()` vs publish-from-FGDB | **Open.** The command raised `ValueError: An index of layers or tables must be provided` on every run; fixed, but not yet re-run against the org. |
 >
 > ### Decisions that changed since this plan was written
 >
@@ -34,6 +43,29 @@
 >   `group.consumes` that disagrees with an item's `share_to`.
 > - **Added beyond the plan:** `doctor`, `list-groups`, `list-content`,
 >   `preview`, and `safety.py` (guards on the one destructive call).
+> - **`copy_feature_layer_collection()` needs an explicit layer and table
+>   selection.** It copies a *subset*, and with both arguments left as `None` it
+>   raises rather than copying everything. The selection is by positional index
+>   into `Item.layers` / `Item.tables`, not by layer id. It also strips each
+>   layer's `indexes`, so the spike is expected to report index differences that
+>   belong to the method rather than to the template. Wrapped as
+>   `copy_whole_service()` and pinned by `tests/test_spike_copy.py`.
+> - **Preflight hard-fails on a taken service name.** It will not auto-suffix. A
+>   silently renamed service is worse than a stopped run, because the name is
+>   reserved org-wide permanently and the project then carries a name nobody
+>   chose. (Note `copy_feature_layer_collection()` *does* auto-suffix internally,
+>   which is another reason preflight must catch collisions first.)
+> - **Cross-project shared services stay out of the manifest.** Some views and
+>   feature services are created once and reused by every project. The manifest
+>   describes what a project *creates*, and `remap_data()` only rewrites ids
+>   present in its mapping, so omitting them is what keeps cloned maps pointing at
+>   them. Discovery must still *report* them — see the gap below.
+> - **Discovery discards references to items outside the inventory**, which made
+>   two Experience Builder apps look dependency-free when only one was. Reporting
+>   referenced-but-unknown ids is folded into the stage 0-2 work.
+> - **Not built from the Phase 1 file tree below:** `agol_provision/steps/*.py` are
+>   still empty and `config/projects/` holds no project files — `--company` and
+>   `--location` are passed on the command line instead. Both land with Phase 2.
 >
 > Read the repo README and `git log` before continuing — commit messages carry the
 > reasoning. Everything below is the original plan, still accurate for Phase 2+.
@@ -41,7 +73,7 @@
 
 ## Context
 
-Standing up a new client project in ArcGIS Online currently means manually creating ~20 interdependent items: a master feature service, 7 views derived from it, 4 groups, 4 web maps, 5 Experience Builder apps, and a dashboard — then wiring sharing between all of them. This takes significant time per project, and manual execution means the "standard" drifts between clients and between the people doing the work.
+Standing up a new client project in ArcGIS Online currently means manually creating ~20 interdependent items: a master feature service, 7 views derived from it, 4 groups, 4 web maps, 4 Experience Builder apps, and a dashboard — then wiring sharing between all of them. This takes significant time per project, and manual execution means the "standard" drifts between clients and between the people doing the work.
 
 Templates of every item already exist in ArcGIS Online, fully configured (layers, filters, groups, forms). The goal is a repeatable, version-controlled tool that provisions a complete, correctly-wired project from those templates given only a company name and location.
 
@@ -70,6 +102,8 @@ Templates of every item already exist in ArcGIS Online, fully configured (layers
 ## Phase 0 — Discovery + Spike (do this first)
 
 Two throwaway scripts that de-risk everything downstream. Discovery runs first because its output informs the spike.
+
+> **As built:** neither stayed a script. Both became first-class CLI commands — `discover` (backed by `discovery.py`) and `spike-master` (backed by `schema_diff.py` and `safety.py`) — because both are re-run whenever the templates change, not once.
 
 ### 0a. Discovery (read-only, no writes)
 
@@ -142,7 +176,11 @@ new_master.manager.create_view(
 )
 ```
 
-Then per-layer `layer.manager.update_definition({...})` for anything the service-level parameters can't express. **This matters:** `create_view`'s `query` and `visible_fields` are service-level conveniences, but your views almost certainly filter and hide fields *differently per layer* (QC vs Testing vs Redline). Read per-layer from the template, apply per-layer.
+Then per-layer `layer.manager.update_definition({...})` for anything the service-level parameters can't express.
+
+**Discovery has now measured this, and the guess was half right.** Definition queries *do* vary per layer: `redline_qc_view_editable` and `cx_redline_edit_view` filter differently across their layers, so `create_view`'s service-level `query` cannot express them and per-layer `update_definition()` is mandatory for those two. Field visibility, however, is uniform across every one of the seven views — none hides a single field — so `visible_fields` is not needed at all until a template starts hiding some. Build the per-layer query path; do not build a per-layer field path on spec.
+
+Layer *subsetting* is the other per-view axis: the seven views span 2 to 18 layers of the master's 17 layers and 1 table, which `view_layers` / `view_tables` handle at creation. `preserve_layer_ids` defaults to `True` in arcgis 2.4 and must stay that way — maps reference layers by URL with the layer index in it.
 
 **Do not clone views.** Cloning a view within the same org is [documented as unreliable](https://community.esri.com/t5/arcgis-api-for-python-questions/non-buggy-way-to-duplicate-hosted-feature-service/td-p/1355735) — it can produce an empty service or silently re-point at the source. Native creation is deterministic.
 

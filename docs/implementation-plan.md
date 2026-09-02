@@ -7,9 +7,9 @@
 
 > ## STATUS — updated after Phase 0 was built
 >
-> **Phase 0 and Phase 1 are built and committed.** 288 tests pass. `discover` has
-> now been run against the real organization; `spike-master` has not yet
-> completed one.
+> **Phase 0 and Phase 1 are built and committed.** 288 tests pass. Both Phase 0
+> commands have now run against the real organization, and **both design forks are
+> closed** — see the table below. Nothing provisions yet.
 >
 > **Phase 2 is being built in stage order, starting with stages 0-2** — preflight,
 > master, views — and stopping there. Stages 3-6 (groups, maps, apps, sharing) are
@@ -76,7 +76,7 @@
 
 ## Context
 
-Standing up a new client project in ArcGIS Online currently means manually creating ~20 interdependent items: a master feature service, 7 views derived from it, 4 groups, 4 web maps, 4 Experience Builder apps, and a dashboard — then wiring sharing between all of them. This takes significant time per project, and manual execution means the "standard" drifts between clients and between the people doing the work.
+Standing up a new client project in ArcGIS Online currently means manually creating ~20 interdependent items: a master feature service, 7 views derived from it, 4 groups, 4 web maps, 3 Experience Builder apps, and a dashboard — then wiring sharing between all of them. This takes significant time per project, and manual execution means the "standard" drifts between clients and between the people doing the work.
 
 Templates of every item already exist in ArcGIS Online, fully configured (layers, filters, groups, forms). The goal is a repeatable, version-controlled tool that provisions a complete, correctly-wired project from those templates given only a company name and location.
 

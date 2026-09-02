@@ -15,8 +15,20 @@ Targets Windows with ArcGIS Pro installed.
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
 the master schema copies faithfully. 288 tests pass, none needing network access.
 
-Nothing has run against a real ArcGIS Online organization yet. The provisioning
-stages come next and are deliberately blocked on what Phase 0 reports.
+Phase 0 has now run against the real organization and both questions it existed
+to answer are settled:
+
+- **The master copies faithfully.** `spike-master` returned `USABLE WITH FIXUPS`
+  with no critical differences — every layer, table, field, field type, domain,
+  attachment setting, and editor-tracking setting survived. The only real loss is
+  10 user-defined indexes, which the master stage reapplies. No publish-from-FGDB
+  fallback is needed.
+- **Two of the seven views need per-layer configuration**, because their
+  definition queries differ per layer. Field visibility is uniform across all
+  seven, so that path is not needed at all.
+
+Provisioning comes next: `docs/phase-2-master-and-views.md` specifies preflight,
+master, and views. Nothing provisions yet.
 
 ## Setup
 
@@ -139,7 +151,12 @@ than one means the selector is catching project content.
 `# [role   ] Title`, under a header reminding you of the next command. Delete the
 lines that are not templates — comments and blanks are ignored, so annotate
 freely. Add any item the groups missed by pasting its id on its own line; the
-master usually needs this. You should be left with 21.
+master usually needs this.
+
+Count what you expect to be left with, and note that groups are **not** in this
+file — they are created, never cloned, so `discover` derives them from how the
+templates are shared. For the current VSCLR set that is 16 lines: 1 master,
+7 views, 4 maps, and 4 apps.
 
 Confirm the pruned list, then run for real:
 

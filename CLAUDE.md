@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Python CLI that provisions a complete ArcGIS Online project from templates —
-one master feature service, 7 views, 4 groups, 4 web maps, 4 Experience Builder
-apps, and a dashboard (21 items), all named from `COMPANY LOCATION` and wired to
+one master feature service, 7 views, 4 groups, 4 web maps, 3 Experience Builder
+apps, and a dashboard (20 items), all named from `COMPANY LOCATION` and wired to
 each other. See `README.md` for the user-facing setup and `docs/implementation-plan.md`
 for the phased plan and the reasoning behind the architecture.
 

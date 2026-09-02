@@ -192,6 +192,32 @@ Live verification, run by hand on a sandbox project:
 6. `--destroy` leaves the org clean.
 7. A second sandbox project provisions without reusing the first's items.
 
+## Before the first run
+
+Three manifest and inventory items, none of which the code can decide:
+
+1. **`agol_provision/templates/vsclr-standard.yaml` is not in version control.**
+   It is generated on the Windows machine and has since been hand-edited -- the
+   title patterns were corrected by hand. `discover` **overwrites** that file, so
+   those edits are one re-run away from being lost with no way to recover them.
+   Commit it before running `discover` again. Once tracked, an overwrite shows up
+   as a reviewable diff instead of a silent loss.
+2. **One view title is inconsistent.** Every view renders `{base} - Something`
+   except `zayo_chicago_design_view_read_only`, which is `{base} Design View
+   (Read Only)` -- no separator. Cosmetic, but titles are what the team sees.
+3. **`zayo_chicago_permit_data_editor` references a map outside the inventory.**
+   It is the remaining entry under "no detected dependencies". Not a blocker for
+   stages 0-2, but stage 4 needs a decision: if that map is shared across all
+   projects it stays out of the manifest and `remap_data()` correctly leaves it
+   alone; if it is per-project it must be added to `ids.txt` and re-discovered.
+
+Also worth knowing: two template views changed capabilities between the
+2026-08-27 and 2026-09-02 discovery runs (`read_only` gained `Extract`,
+`data_manager_view` gained `ChangeTracking`). Nothing is wrong -- views replay the
+template's capabilities at provision time, so edits propagate on their own. It is
+a reminder that the templates are live and `snapshots/` is the only record of
+what they used to be, which is the argument for committing them.
+
 ## Follow-ups, not blocking
 
 - **Report referenced-but-unknown item ids in discovery.** `find_dependencies()`

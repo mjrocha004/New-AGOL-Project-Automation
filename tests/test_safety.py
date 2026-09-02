@@ -76,17 +76,51 @@ class TestDeleteIsRefused:
         assert refuse_delete_reason(item, template_id=MASTER, expected_name=spike_name)
 
 
-class TestOnlyOneDeleteExists:
-    def test_codebase_contains_exactly_one_item_delete(self):
-        """A second delete path would bypass these guards entirely."""
+class TestEveryDeleteIsGuarded:
+    """Deletes may live only where something checks what is being deleted.
+
+    `spike_master` deletes the one service it just created, checked by
+    `refuse_delete_reason`. `_destroy` deletes only item ids recorded in run
+    state, so it can never touch anything this tool merely found. A delete
+    anywhere else would bypass both guards, so adding one has to be a deliberate
+    edit to this list rather than something that slips in.
+    """
+
+    GUARDED = {
+        "spike_master": "refuse_delete_reason checks the item is the spike's own copy",
+        "_destroy": "walks run state, so only recorded item ids are reachable",
+    }
+
+    def _delete_sites(self):
+        import ast
         from pathlib import Path
 
         pkg = Path(__file__).resolve().parent.parent / "agol_provision"
-        hits = []
-        for f in pkg.rglob("*.py"):
-            for n, line in enumerate(f.read_text().splitlines(), 1):
-                stripped = line.strip()
-                if ".delete()" in stripped and not stripped.startswith("#"):
-                    hits.append(f"{f.name}:{n}")
-        assert len(hits) == 1, f"expected exactly one .delete() call, found: {hits}"
-        assert hits[0].startswith("cli.py:"), f"delete moved out of cli.py: {hits[0]}"
+        sites = {}
+        for f in sorted(pkg.rglob("*.py")):
+            tree = ast.parse(f.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for call in ast.walk(node):
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "delete"
+                        and not call.args
+                    ):
+                        sites.setdefault(node.name, []).append(f"{f.name}:{call.lineno}")
+        return sites
+
+    def test_deletes_appear_only_in_the_guarded_functions(self):
+        sites = self._delete_sites()
+        assert set(sites) == set(self.GUARDED), (
+            f"delete() found in {sorted(sites)}; only {sorted(self.GUARDED)} may "
+            f"delete. A new delete path needs its own guard and an entry here."
+        )
+
+    def test_the_guarded_functions_are_where_they_are_expected(self):
+        sites = self._delete_sites()
+        assert all(
+            where.startswith("cli.py:") for wheres in sites.values() for where in wheres
+        ), sites

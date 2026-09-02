@@ -12,16 +12,19 @@ for the phased plan and the reasoning behind the architecture.
 
 ## Status and what is blocked
 
-Phase 0 (discovery + master-copy spike) and the core modules are built. **The
-provisioning stages are deliberately not started.** `docs/implementation-plan.md`
-holds the phased plan and the reasoning.
+Phase 0 (discovery + master-copy spike) and the core modules are built.
+`docs/implementation-plan.md` holds the phased plan and the reasoning.
 
-**Next work is Phase 2, stages 0-2 only** — preflight, master, views. Stages 3-6
+**Phase 2 is being built in stage order. Stage 0 (preflight) is done** —
+`preflight.py` plus `provision`, which resolves the templates, renders every
+name, and hard-fails on a taken service name. It writes nothing to AGOL, so it
+is safe to re-run. **Stages 1 (master) and 2 (views) are next.** Stages 3-6
 (groups, maps, apps, sharing) are deferred at the user's request: creating four
 groups by hand takes a minute, creating seven views takes a day, so the views
 stage carries nearly all the value and none of the clone/remap risk. The plan
 anticipated this split in its Scope note. `share_to` stays in the manifest,
-unused, until the groups stage exists.
+validated but unused, until the groups stage exists. Provisioned items land at
+the org root; moving them into a folder is a manual step by choice.
 
 **Both design forks are now closed** by runs against the real org:
 

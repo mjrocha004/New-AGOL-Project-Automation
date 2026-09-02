@@ -123,6 +123,10 @@ class NameContext:
     def slug(self) -> str:
         """Filesystem-safe project key, e.g. ``"companya-moline"``.
 
-        Used for state and config filenames, never sent to AGOL.
+        Used for state and config filenames, never sent to AGOL. Derived from
+        `base_service_name` rather than the title so that an override rescues
+        this too -- a company like "3M" cannot start a service name, and fixing
+        every service name while still failing on the state filename would make
+        the override useless in exactly the case it exists for.
         """
-        return sanitize_service_name(self.base_title).lower().replace("_", "-")
+        return self.base_service_name.lower().replace("_", "-")

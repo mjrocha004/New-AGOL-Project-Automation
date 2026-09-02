@@ -88,6 +88,17 @@ class TestNameContext:
     def test_slug_is_filesystem_safe(self, ctx):
         assert ctx.slug() == "companya-moline"
 
+    def test_slug_honours_the_override(self):
+        """Otherwise the escape hatch cannot rescue the case it exists for.
+
+        A company like "3M" cannot start a service name, and the error tells the
+        user to set an override. If the slug still derived from the raw title,
+        the override would fix every service name and the run would still fail
+        on the state filename.
+        """
+        ctx = NameContext(company="3M", location="Moline", service_name_override="ThreeM_Moline")
+        assert ctx.slug() == "threem-moline"
+
     def test_strips_incidental_whitespace(self):
         ctx = NameContext(company="  CompanyA  ", location="  Moline  ")
         assert ctx.base_title == "CompanyA Moline"

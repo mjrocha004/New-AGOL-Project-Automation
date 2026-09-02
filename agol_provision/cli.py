@@ -22,6 +22,9 @@ console = Console()
 err = Console(stderr=True, style="bold red")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Per-project run state. Git-ignored: it holds live AGOL item ids for real client
+# projects, and rollback needs it while version control does not.
+STATE_DIR = REPO_ROOT / "state"
 
 
 def _fail(message: str) -> None:
@@ -696,6 +699,136 @@ def spike_master(profile, master_id, keep, yes) -> None:
                     err.print(f"Could not delete {spike_name}: {exc}\nDelete it by hand.")
         elif copy_item is not None:
             console.print(f"[yellow]Left {spike_name} in place (--keep).[/yellow]")
+
+
+# ---------------------------------------------------------------- phase 2
+
+
+@main.command()
+@click.option("--company", default=None, help="Client company name, e.g. CompanyA.")
+@click.option("--location", default=None, help="Project location, e.g. Moline.")
+@click.option("--manifest", "manifest_path", type=click.Path(exists=True), default=None,
+              help="Manifest to provision from. Defaults to the generated vsclr-standard.yaml.")
+@click.option("--service-name-override", default=None, metavar="STEM",
+              help="Replace the derived service-name stem, when the standard one is taken.")
+@click.option("--dry-run", is_flag=True,
+              help="Print the plan and write nothing at all, not even run state.")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
+def provision(company, location, manifest_path, service_name_override, dry_run, profile) -> None:
+    """Provision a project from a manifest.
+
+    Runs stage 0 -- preflight -- and stops. Stages 1 (the master service) and 2
+    (its views) are not built yet, so this command currently creates nothing in
+    ArcGIS Online and is safe to re-run while the naming is still being settled.
+
+    Preflight is the gate on the one irreversible thing here: a hosted service
+    name is reserved org-wide permanently, even after the service is deleted. A
+    name that is already taken stops the run. Nothing is ever auto-renamed.
+    """
+    from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.manifest import ManifestError, load_manifest
+    from agol_provision.naming import NameContext, NamingError
+    from agol_provision.preflight import (
+        STATUS_AVAILABLE,
+        STATUS_EXISTS,
+        STATUS_OUT_OF_SCOPE,
+        STATUS_TAKEN,
+        run_preflight,
+    )
+    from agol_provision.state import ProjectState, StateError
+
+    if not company or not location:
+        _fail("Both --company and --location are required, e.g. "
+              "`--company CompanyA --location Moline`.")
+
+    path = Path(manifest_path) if manifest_path else (
+        REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
+    )
+    try:
+        manifest = load_manifest(path)
+    except ManifestError as exc:
+        _fail(str(exc))
+
+    try:
+        ctx = NameContext(
+            company=company, location=location, service_name_override=service_name_override
+        )
+        slug = ctx.slug()
+    except NamingError as exc:
+        _fail(str(exc))
+
+    try:
+        gis = connect(profile)
+    except AuthError as exc:
+        _fail(str(exc))
+
+    # Reading state is not writing it -- load_or_create only constructs, so this
+    # stays safe under --dry-run.
+    try:
+        state = ProjectState.load_or_create(
+            state_dir=STATE_DIR, slug=slug, company=company, location=location,
+            manifest_name=manifest.name, manifest_version=manifest.version,
+        )
+    except StateError as exc:
+        _fail(str(exc))
+
+    mode = "dry run, nothing will be written" if dry_run else "live run"
+    console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
+    console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} -- {path}")
+    console.print(f"Project [cyan]{company} / {location}[/cyan]  ({slug}, {mode})\n")
+
+    report = run_preflight(gis, manifest, ctx, state=state)
+
+    styles = {
+        STATUS_AVAILABLE: "green",
+        STATUS_TAKEN: "bold red",
+        STATUS_EXISTS: "cyan",
+        STATUS_OUT_OF_SCOPE: "dim",
+    }
+    table = Table(title="Plan")
+    for col in ("Kind", "Key", "Title", "Service name", "Status"):
+        table.add_column(col, overflow="fold")
+    for row in report.plan:
+        style = styles.get(row.status, "yellow")
+        table.add_row(
+            row.kind, row.key, row.title,
+            row.service_name or "[dim]n/a[/dim]",
+            f"[{style}]{row.status}[/{style}]",
+        )
+    console.print(table)
+
+    if report.warnings:
+        console.print()
+        for problem in report.warnings:
+            console.print(f"[yellow]warning[/yellow]  {problem.message}")
+
+    if report.errors:
+        console.print()
+        for problem in report.errors:
+            err.print(f"FAIL  {problem.message}")
+        if any(row.status == STATUS_TAKEN for row in report.plan):
+            # Said once, after the list, rather than repeated per collision.
+            console.print(
+                "\n[yellow]To fix a taken name:[/yellow] change that item's "
+                "`service_name` in the manifest for a single collision, or pass "
+                "--service-name-override to change the stem for the whole project. "
+                "Nothing is renamed automatically -- a service carrying a name nobody "
+                "chose is worse than a stopped run."
+            )
+        _fail(f"\nPREFLIGHT FAILED -- {len(report.errors)} problem(s). "
+              f"Nothing was created.")
+
+    console.print("\n[bold green]PREFLIGHT PASSED[/bold green]")
+    if dry_run:
+        console.print("[dim]--dry-run: nothing was written, not even run state.[/dim]")
+    else:
+        state.complete_stage("preflight")
+        console.print(f"[dim]Preflight recorded in {state.path}[/dim]")
+    console.print(
+        "Stages 1 (master) and 2 (views) are not built yet. "
+        "Nothing was created in ArcGIS Online."
+    )
 
 
 if __name__ == "__main__":

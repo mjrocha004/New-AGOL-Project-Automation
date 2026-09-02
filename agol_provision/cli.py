@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -26,6 +27,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _fail(message: str) -> None:
     err.print(message)
     sys.exit(1)
+
+
+def copy_whole_service(template: Any, service_name: str) -> Any:
+    """Copy every layer and table of a feature service into a new one.
+
+    `copy_feature_layer_collection()` selects a *subset*, and its defaults are not
+    "everything" -- with both `layers` and `tables` left as None it raises. The
+    values it selects with are positional indexes into `Item.layers` /
+    `Item.tables` (it evaluates `self.layers[idx]`), not layer ids, so a master
+    whose layer ids start at 11 needs 0..n-1 here.
+
+    Note that the copy drops each layer's `indexes` before applying the
+    definition, so the spike is expected to report index differences. That is a
+    property of this method, not of the template.
+    """
+    return template.copy_feature_layer_collection(
+        service_name=service_name,
+        layers=list(range(len(template.layers))),
+        tables=list(range(len(template.tables))),
+    )
 
 
 @click.group()
@@ -609,7 +630,7 @@ def spike_master(profile, master_id, keep, yes) -> None:
     copy_item = None
     try:
         console.print(f"Creating {spike_name}...")
-        copy_item = template.copy_feature_layer_collection(service_name=spike_name)
+        copy_item = copy_whole_service(template, spike_name)
         if copy_item is None:
             _fail("copy_feature_layer_collection() returned None -- the copy failed. "
                   "Fall back to publishing from the file geodatabase.")

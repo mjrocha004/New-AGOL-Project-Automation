@@ -236,13 +236,15 @@ This is a real project — roughly 1,500–2,500 lines including tests. Phase 0 
 The plan assumed a stored ArcGIS profile. Two additions came out of setting the
 tool up on a second machine:
 
-- **`--profile pro`** borrows whichever portal ArcGIS Pro is signed in to. No
+- **`--profile home`** (the default) borrows whichever portal ArcGIS Pro is signed in to. No
   credentials are stored or typed, and it works with SAML/SSO accounts, which
   cannot accept a password from a script. It reads the token through `arcpy`, so
   it only works inside ArcGIS Pro's own Python environment. Outside a hosted
   notebook the ArcGIS API rewrites `home` to `pro`, so both names work.
-- **`setup-profile --client-id`** performs the interactive OAuth flow, for SSO
-  accounts on machines without ArcGIS Pro.
+- **`setup-profile`** stores a username/password profile, for machines without
+  ArcGIS Pro. An OAuth `--client-id` path was added and then removed: on a machine
+  with Pro, `home` already solves SSO, and the OAuth flow was a second
+  under-exercised code path for the same problem.
 - **`doctor`** checks Python and `arcgis` versions, keyring round-trip, the
   connection, and account privileges. The `arcgis >= 2.4` floor is enforced at
   runtime rather than assumed, because a machine using Pro's bundled Python gets

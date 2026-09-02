@@ -28,10 +28,20 @@ master or views stages by guessing which fork applies — ask.
 
 ```bash
 uv sync --group dev          # build the environment
-uv run pytest                # all tests (~140, no network required)
+uv run pytest                # all tests (~290, no network required)
 uv run pytest tests/test_naming.py::TestSanitizeServiceName -x
 uv run agol-provision --help
 ```
+
+`--profile` defaults to `home`, which borrows ArcGIS Pro's sign-in. Pass a stored
+profile name instead on a machine without Pro. (`pro` is accepted as a synonym;
+outside a hosted notebook the ArcGIS API rewrites `home` to `pro` anyway.)
+
+**Two test files assert that the docs match the code**, and will fail a commit
+that drifts: `test_readme_accuracy.py` checks every
+`python -m agol_provision.cli ...` invocation in `README.md` against the real CLI,
+and `test_no_dead_options.py` fails any click option that is declared but never
+read. Update the README in the same commit as a flag rename.
 
 `pyproject.toml` already sets `addopts = "-q"`. Passing `-q` again makes it `-qq`,
 which suppresses the pass/fail summary line — run bare `uv run pytest` when you
@@ -41,7 +51,7 @@ Inside ArcGIS Pro's Python environment there is no console script; run the modul
 directly, which needs no install step:
 
 ```bat
-python -m agol_provision.cli doctor --profile pro
+python -m agol_provision.cli doctor --profile home
 ```
 
 Tests never touch the network. Anything requiring AGOL is exercised through fakes
@@ -68,6 +78,12 @@ form part of a REST URL, must start with a letter, and are reserved org-wide
 *permanently* — even after deletion. Preflight checks every derived name before
 creating anything.
 
+**`safety.py` guards the only destructive operation.** `spike-master` creates a
+temporary service and deletes it. The code path makes deleting anything else
+structurally impossible, but that is checked rather than assumed: the delete is
+refused unless the item carries the spike's `ZZZ_SPIKE_TEST_` prefix. An orphaned
+test service is a nuisance; deleting the wrong thing is not.
+
 **Discovery derives the dependency graph by scanning serialized item JSON** for
 the ids of other template items, rather than parsing each item type's schema.
 Web maps, dashboards, and Experience Builder apps all nest their references
@@ -90,8 +106,9 @@ rather than an error:
   throughout an item's JSON.
 - **Experience Builder reads its draft.** A remapped experience must be
   republished before end users see corrected data sources.
-- **`--profile pro` requires ArcGIS Pro's Python**, because it reads the sign-in
-  token through `arcpy`. It cannot work from a standalone venv.
+- **`--profile home` requires ArcGIS Pro's Python**, because it reads the sign-in
+  token through `arcpy`. It cannot work from a standalone venv — use a stored
+  profile there.
 
 ## Verifying app rewiring
 

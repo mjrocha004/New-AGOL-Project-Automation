@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 288 tests pass, none needing network access.
+the master schema copies faithfully. 331 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -27,8 +27,11 @@ to answer are settled:
   definition queries differ per layer. Field visibility is uniform across all
   seven, so that path is not needed at all.
 
-Provisioning comes next: `docs/phase-2-master-and-views.md` specifies preflight,
-master, and views. Nothing provisions yet.
+Provisioning is being built in stage order against
+`docs/phase-2-master-and-views.md`. **Stage 0, preflight, is in** — `provision`
+resolves the templates, renders every name, and refuses to go on if a service
+name is already taken. Stages 1 (master) and 2 (views) come next. Nothing is
+created in ArcGIS Online yet.
 
 ## Setup
 
@@ -91,7 +94,8 @@ Exits non-zero on failure.
 ## Commands
 
 All read-only except `spike-master`, which creates and deletes one service and
-asks first.
+asks first. `provision` will write once stages 1 and 2 land; today it runs
+preflight and stops, so it too only reads.
 
 | Command | Purpose |
 | --- | --- |
@@ -101,6 +105,7 @@ asks first.
 | `discover` | Audit the templates; write the manifest, snapshots, and report. |
 | `preview` | Show every name a manifest would produce. No connection needed. |
 | `spike-master` | Test whether the master schema copies faithfully. |
+| `provision` | Provision a project. Currently runs preflight and stops. |
 | `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
 
 ## Phase 0 — run these, then send back the output
@@ -253,6 +258,57 @@ that newly created item and nothing else. That is checked rather than assumed:
 `ZZZ_SPIKE_TEST_` prefix, or is not the service the copy returned — leaving it in
 place instead. A leftover test service is a ten-second cleanup; a wrongly deleted
 service is not. Pass `--keep` to skip the delete entirely.
+
+## Phase 2 — provisioning
+
+Built in stage order. **Stage 0, preflight, is the only stage that exists so
+far** — it reads, reports, and stops. Stages 1 (the master feature service) and 2
+(its views) come next; stages 3–6 (groups, maps, apps, sharing) stay manual for
+now.
+
+### Preflight
+
+```bat
+python -m agol_provision.cli provision --company CompanyA --location Moline --dry-run
+```
+
+Prints the full plan — every item, its title, and its service name — and checks
+everything that can be checked without writing:
+
+- the account holds the privileges provisioning needs
+- every `template_item_id` resolves, is visible, and is the kind of item the
+  manifest claims (a view where a view is expected, the master where the master
+  is)
+- every title and service name renders
+- no two items derive the same service name
+- **every derived service name is still free in the organization**
+
+That last check is the reason this stage exists. A hosted service name is
+reserved org-wide **permanently** — deleting the service does not release it — so
+a collision found at stage 1 has already burned the name.
+
+**A taken name stops the run, and nothing is ever renamed automatically.** A
+silently suffixed service (`CompanyA_Moline_2`) is worse than a stopped run: the
+project carries a name nobody chose and every downstream reference points at it.
+Note that `copy_feature_layer_collection()` *does* auto-suffix internally, which
+is the second reason the collision has to be caught here rather than at stage 1.
+
+Problems are collected rather than reported one at a time, so a run tells you
+about all four collisions at once instead of one per attempt.
+
+If a name is taken, fix it in one of two places. Change that item's
+`service_name` in the manifest when a single name collides; pass
+`--service-name-override` when the whole stem does, which is the usual case when
+re-provisioning a project name that was already used:
+
+```bat
+python -m agol_provision.cli provision --company CompanyA --location Moline --service-name-override CompanyA_Moline_B
+```
+
+Drop `--dry-run` to record that preflight passed in `state/<slug>.json`. Nothing
+is created in ArcGIS Online either way until stage 1 exists. Groups, maps, and
+apps appear in the plan marked `not in this build`; their `share_to` entries are
+still validated when the manifest loads, just not acted on.
 
 ## Signing in
 

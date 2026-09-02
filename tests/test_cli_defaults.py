@@ -161,3 +161,29 @@ class TestPreview:
 
         result = CliRunner().invoke(main, ["preview", "--manifest", str(path)])
         assert "Duplicate service names" in result.output.replace("\n", " ")
+
+
+class TestProvision:
+    """Stage 0 is the gate on a permanent, org-wide name. Its shape matters."""
+
+    def test_command_exists(self):
+        assert "provision" in main.commands
+
+    def test_defaults_to_the_pro_connection(self):
+        assert _profile_option("provision").default == "home"
+
+    def test_offers_a_dry_run(self):
+        cmd = main.commands["provision"]
+        dry = next(p for p in cmd.params if p.name == "dry_run")
+        assert dry.is_flag and dry.default is False
+
+    def test_company_and_location_are_validated_in_the_body_not_by_click(self):
+        """`--destroy <slug>` takes neither, so click must not demand them."""
+        cmd = main.commands["provision"]
+        for name in ("company", "location"):
+            assert not next(p for p in cmd.params if p.name == name).required
+
+    def test_offers_the_service_name_override_that_naming_errors_point_at(self):
+        """naming.py tells the user to set an override; it has to be settable."""
+        cmd = main.commands["provision"]
+        assert any("--service-name-override" in p.opts for p in cmd.params)

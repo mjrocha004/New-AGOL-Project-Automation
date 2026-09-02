@@ -202,14 +202,19 @@ Three manifest and inventory items, none of which the code can decide:
    those edits are one re-run away from being lost with no way to recover them.
    Commit it before running `discover` again. Once tracked, an overwrite shows up
    as a reviewable diff instead of a silent loss.
-2. **One view title is inconsistent.** Every view renders `{base} - Something`
-   except `zayo_chicago_design_view_read_only`, which is `{base} Design View
-   (Read Only)` -- no separator. Cosmetic, but titles are what the team sees.
-3. **`zayo_chicago_permit_data_editor` references a map outside the inventory.**
-   It is the remaining entry under "no detected dependencies". Not a blocker for
-   stages 0-2, but stage 4 needs a decision: if that map is shared across all
-   projects it stays out of the manifest and `remap_data()` correctly leaves it
-   alone; if it is per-project it must be added to `ids.txt` and re-discovered.
+2. ~~One view title is inconsistent.~~ Fixed by hand: `design_view_read_only`
+   now carries the `" - "` separator the other six views use.
+3. **Decided: `zayo_chicago_permit_data_editor`'s missing dependency is a map
+   shared across all projects.** It therefore stays out of the manifest
+   permanently. This is correct rather than an omission -- the manifest describes
+   what a project *creates*, and `remap_data()` only rewrites ids present in its
+   mapping, so the cloned app keeps pointing at the shared map by doing nothing.
+
+   Two consequences worth carrying forward. That app will keep appearing under
+   "no detected dependencies" in every discovery report, and that is the expected
+   output, not a bug to chase. And when discovery is taught to report
+   referenced-but-unknown ids (see Follow-ups), this map is exactly what it should
+   surface -- as a shared service deliberately excluded, not a missing template.
 
 Also worth knowing: two template views changed capabilities between the
 2026-08-27 and 2026-09-02 discovery runs (`read_only` gained `Extract`,

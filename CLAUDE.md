@@ -130,6 +130,17 @@ rather than an error:
 - **`--profile home` requires ArcGIS Pro's Python**, because it reads the sign-in
   token through `arcpy`. It cannot work from a standalone venv — use a stored
   profile there.
+- **A layer's `fields` does not include the geometry field.** So looking for
+  `esriFieldTypeGeometry` to identify the shape field finds nothing, and a
+  spatial index (`user_<id>.<LAYER>_Shape_sidx`) reads as user-defined. AGOL then
+  rejects reapplying it. `master.py` also treats an index over any field the
+  layer does not expose as system-generated, which catches this without
+  name-matching. Found by the first live run: 17 spatial indexes were attempted.
+- **`add_to_definition()` rejects the whole call if any one index in it is
+  invalid.** Batching per layer therefore turns one bad index into zero applied
+  indexes for that layer. In the first live run this took all 10 real indexes
+  down with the 17 spatial ones -- `0 applied, 27 failed`. `reapply_user_indexes`
+  retries each index alone when a batch fails.
 - **`copy_feature_layer_collection()` copies nothing by default.** It selects a
   *subset*, so called with both `layers` and `tables` left as `None` it raises
   rather than copying everything. The values it selects with are **positional

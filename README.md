@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 398 tests pass, none needing network access.
+the master schema copies faithfully. 430 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -28,11 +28,11 @@ to answer are settled:
   seven, so that path is not needed at all.
 
 Provisioning is being built in stage order against
-`docs/phase-2-master-and-views.md`. **Stages 0 (preflight) and 1 (master) are
-in** — `provision` resolves the templates, renders every name, refuses to go on
-if a service name is already taken, then copies the master and reapplies the
-indexes the copy drops. `--destroy` rolls it back. Stage 2, the views, comes
-next.
+`docs/phase-2-master-and-views.md`. **Stages 0-2 are in** — `provision`
+resolves the templates, renders every name, refuses to go on if a service name is
+already taken, copies the master, reapplies the indexes the copy drops, and
+creates all seven views from it. `--destroy` rolls the whole thing back. Groups,
+maps, apps and sharing stay manual.
 
 ## Setup
 
@@ -107,7 +107,7 @@ read-only.
 | `discover` | Audit the templates; write the manifest, snapshots, and report. |
 | `preview` | Show every name a manifest would produce. No connection needed. |
 | `spike-master` | Test whether the master schema copies faithfully. |
-| `provision` | Provision a project: preflight, then the master service. |
+| `provision` | Provision a project: preflight, master service, and views. |
 | `inspect-indexes` | Compare a provisioned master's indexes against its template. |
 | `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
 
@@ -269,16 +269,17 @@ service is not. Pass `--keep` to skip the delete entirely.
 
 ## Phase 2 — provisioning
 
-Built in stage order. **Stages 0 (preflight) and 1 (the master feature service)
-are in.** Stage 2, the views, comes next; stages 3–6 (groups, maps, apps,
-sharing) stay manual for now.
+Built in stage order. **Stages 0 (preflight), 1 (the master feature service) and
+2 (its views) are in.** Stages 3–6 (groups, maps, apps, sharing) stay manual for
+now — creating four groups by hand takes a minute, where creating seven views
+took a day.
 
 ```bat
 python -m agol_provision.cli provision --company CompanyA --location Moline
 ```
 
-Runs preflight, creates the master, and stops. Add `--dry-run` to stop after
-preflight without writing anything.
+Runs preflight, creates the master, then creates its seven views. Add
+`--dry-run` to stop after preflight without writing anything.
 
 ### Preflight
 
@@ -391,6 +392,45 @@ on it, and what the copy currently has.
 
 Anything reported `MISSING` is fixed by re-running `provision` for that project —
 it repairs in place rather than creating a second service.
+
+### The views
+
+This is the stage that carries the time saving, and the only one that touches
+none of the risky machinery — no `clone_items()`, no `remap_data()`, no
+Experience Builder republish.
+
+Each view is **created, never cloned**. Cloning a hosted feature layer view
+within one organization is unreliable: it can produce an empty service or
+silently re-point at the source. So `create_view()` builds it from the new
+master, and the template view's real configuration is read **live at provision
+time** and replayed — capabilities, which of the master's layers it exposes, and
+each layer's definition query. Reading it live rather than storing it in the
+manifest means editing a template view in AGOL propagates to the next project
+with no manifest edit. Two template views changed capabilities between two
+discovery runs; nothing had to be done about it.
+
+Layers are matched to the master **by layer id**, not by position — the master's
+17 layers carry ids running past 17, and the seven views each expose a different
+subset, from 2 layers to 18. The name is checked against the id rather than
+trusted: a view built over the wrong layer shows the wrong data to whoever the
+view is shared with.
+
+**`create_view()`'s own `query` argument is never used.** It applies the query to
+the first layer of the view only, so a view spanning eighteen layers would be
+created with seventeen of them unfiltered — and these views are shared to
+subcontractors, so that leaks data rather than merely showing the wrong rows. It
+also rewrites that first layer's field visibility as a side effect. Every
+definition query is applied per layer instead, for every view, whether or not the
+template's queries are uniform. Two of the seven templates filter differently per
+layer; the other five happen to be uniform, and are treated identically.
+
+No `visible_fields` handling exists. Field visibility is uniform across all seven
+template views and none hides a field, so that path is not built on spec. If a
+template starts hiding fields, `discover` reports `Uniform fields: False`.
+
+Views are recorded in state after the master, which is what makes `--destroy`
+delete them first — AGOL refuses to delete a feature service while its views
+still exist.
 
 ### Rolling a project back
 

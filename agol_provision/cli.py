@@ -838,11 +838,78 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
     state.complete_stage("preflight")
     _create_master(gis, manifest, ctx, state)
     state.complete_stage("master")
+    _create_views(gis, manifest, ctx, state)
+    state.complete_stage("views")
 
     console.print(
-        "\nStage 2 (views) is not built yet. The master exists; nothing else "
-        "was created."
+        f"\n[bold green]Done.[/bold green] {len(state.items)} item(s) created. "
+        f"Groups, maps, apps and sharing (stages 3-6) remain manual."
     )
+
+
+def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
+    """Stage 2: create each view natively from the new master and replay it."""
+    from agol_provision.state import CreatedItem
+    from agol_provision.views import (
+        APPLIED,
+        ViewError,
+        apply_definition_queries,
+        read_template_view,
+        service_of,
+        source_layers,
+    )
+
+    console.print("\n[bold]Stage 2 -- views[/bold]")
+    master_flc = service_of(gis.content.get(state.get(manifest.master.key).item_id))
+
+    for spec in manifest.views:
+        title = ctx.render_title(spec.title)
+        service_name = ctx.render_service_name(spec.service_name)
+        if state.has(spec.key):
+            console.print(f"[dim]{service_name} already created; skipping.[/dim]")
+            continue
+
+        template = gis.content.get(spec.template_item_id)
+        # Read live rather than from the manifest, so editing a template view in
+        # AGOL propagates to the next project with no manifest edit.
+        plan = read_template_view(service_of(template))
+        try:
+            view_layers, view_tables = source_layers(master_flc, plan)
+        except ViewError as exc:
+            _fail(f"{spec.key}: {exc}")
+
+        # `query=` is deliberately not passed. It reaches layers[0] only, so on a
+        # view spanning eighteen layers the rest would be created unfiltered --
+        # and these are shared to subcontractors.
+        new_item = master_flc.manager.create_view(
+            name=service_name,
+            capabilities=plan.capabilities,
+            view_layers=view_layers,
+            view_tables=view_tables,
+            preserve_layer_ids=True,
+        )
+        if new_item is None:
+            _fail(f"create_view() returned None for {service_name}. Nothing was "
+                  f"recorded; check the org before re-running.")
+
+        state.record(CreatedItem(
+            key=spec.key, item_id=new_item.itemid, item_type="Feature Service",
+            title=title, service_name=service_name,
+        ))
+        new_item.update(item_properties={"title": title})
+
+        outcomes = apply_definition_queries(service_of(new_item), plan)
+        applied = [o for o in outcomes if o.status == APPLIED]
+        problems = [o for o in outcomes if o.status != APPLIED]
+        shape = "uniform" if plan.uniform_query else "per-layer"
+        console.print(
+            f"[green]Created[/green] {service_name}  "
+            f"[dim]{len(view_layers)} layer(s), {len(view_tables)} table(s), "
+            f"{len(applied)} {shape} query(ies), caps {plan.capabilities}[/dim]"
+        )
+        for problem in problems:
+            err.print(f"  definition query {problem.status} on {problem.layer}: "
+                      f"{problem.detail}")
 
 
 def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:

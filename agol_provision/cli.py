@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Per-project run state. Git-ignored: it holds live AGOL item ids for real client
 # projects, and rollback needs it while version control does not.
 STATE_DIR = REPO_ROOT / "state"
+
+# Named so tests can substitute it. Stage 2 has to wait out an AGOL job that
+# the arcgis API starts and does not track; the waiting itself is covered by
+# views.wait_for_layers' own tests.
+SLEEP = time.sleep
 
 
 def _fail(message: str) -> None:
@@ -857,6 +863,7 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         read_template_view,
         service_of,
         source_layers,
+        wait_for_layers,
     )
 
     console.print("\n[bold]Stage 2 -- views[/bold]")
@@ -896,9 +903,29 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
             key=spec.key, item_id=new_item.itemid, item_type="Feature Service",
             title=title, service_name=service_name,
         ))
-        new_item.update(item_properties={"title": title})
+        # create_view() copies snippet, description and tags from the *source*
+        # service's item when they are not given -- and the source is the new
+        # master, so without this every view carries the master's blurb.
+        new_item.update(item_properties={
+            "title": title,
+            "snippet": getattr(template, "snippet", "") or "",
+            "description": getattr(template, "description", "") or "",
+            "tags": list(getattr(template, "tags", []) or []),
+        })
 
-        outcomes = apply_definition_queries(service_of(new_item), plan)
+        # AGOL adds a view's layers with an async job that create_view() does not
+        # wait for, so the service can report nothing at all for several seconds.
+        # Each poll builds a fresh collection: `.layers` is snapshotted once.
+        try:
+            ready = wait_for_layers(
+                lambda: service_of(new_item),
+                {lv.name for lv in [*plan.layers, *plan.tables]},
+                sleep=SLEEP,
+            )
+        except ViewError as exc:
+            _fail(f"{spec.key}: {exc}")
+
+        outcomes = apply_definition_queries(ready, plan)
         applied = [o for o in outcomes if o.status == APPLIED]
         problems = [o for o in outcomes if o.status != APPLIED]
         shape = "uniform" if plan.uniform_query else "per-layer"
@@ -907,9 +934,16 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
             f"[dim]{len(view_layers)} layer(s), {len(view_tables)} table(s), "
             f"{len(applied)} {shape} query(ies), caps {plan.capabilities}[/dim]"
         )
-        for problem in problems:
-            err.print(f"  definition query {problem.status} on {problem.layer}: "
-                      f"{problem.detail}")
+        if problems:
+            # An unapplied definition query means an UNFILTERED view, not a
+            # slightly wrong one. These get shared to subcontractors, so stopping
+            # beats reporting Created and carrying on.
+            for problem in problems:
+                err.print(f"  definition query {problem.status} on {problem.layer}: "
+                          f"{problem.detail}")
+            _fail(f"{service_name} was created but {len(problems)} of its layers "
+                  f"carry no definition query, so it is UNFILTERED. It is recorded "
+                  f"in state -- `provision --destroy {state.slug}` removes it.")
 
 
 def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:

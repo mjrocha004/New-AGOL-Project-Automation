@@ -15,10 +15,12 @@ for the phased plan and the reasoning behind the architecture.
 Phase 0 (discovery + master-copy spike) and the core modules are built.
 `docs/implementation-plan.md` holds the phased plan and the reasoning.
 
-**Phase 2 is being built in stage order. Stage 0 (preflight) is done** —
-`preflight.py` plus `provision`, which resolves the templates, renders every
-name, and hard-fails on a taken service name. It writes nothing to AGOL, so it
-is safe to re-run. **Stages 1 (master) and 2 (views) are next.** Stages 3-6
+**Phase 2 is being built in stage order. Stages 0 (preflight) and 1 (master)
+are done** — `preflight.py` resolves the templates, renders every name, and
+hard-fails on a taken service name; `master.py` copies the template master and
+reapplies the user-defined indexes the copy drops, classified by *fields* rather
+than by name. `provision --destroy` rolls a project back from run state.
+**Stage 2 (views) is next.** Stages 3-6
 (groups, maps, apps, sharing) are deferred at the user's request: creating four
 groups by hand takes a minute, creating seven views takes a day, so the views
 stage carries nearly all the value and none of the clone/remap risk. The plan
@@ -94,11 +96,14 @@ form part of a REST URL, must start with a letter, and are reserved org-wide
 *permanently* — even after deletion. Preflight checks every derived name before
 creating anything.
 
-**`safety.py` guards the only destructive operation.** `spike-master` creates a
-temporary service and deletes it. The code path makes deleting anything else
-structurally impossible, but that is checked rather than assumed: the delete is
-refused unless the item carries the spike's `ZZZ_SPIKE_TEST_` prefix. An orphaned
-test service is a nuisance; deleting the wrong thing is not.
+**Every delete is guarded, and there are exactly two.** `spike-master` creates a
+temporary service and deletes it; `safety.py` refuses that delete unless the item
+carries the spike's `ZZZ_SPIKE_TEST_` prefix and is the service the copy just
+returned. `provision --destroy` deletes only ids recorded in run state, so it
+cannot reach anything the tool merely found. `tests/test_safety.py` walks the
+package AST and fails if a `delete()` appears in any other function -- a third
+delete path has to be a deliberate edit to that list. An orphaned test service is
+a nuisance; deleting the wrong thing is not.
 
 **Discovery derives the dependency graph by scanning serialized item JSON** for
 the ids of other template items, rather than parsing each item type's schema.

@@ -427,7 +427,12 @@ class TestProvisionCommand:
         monkeypatch.setattr(cli, "STATE_DIR", d)
         return d
 
-    def invoke(self, monkeypatch, manifest_file, state_dir, gis=None, extra=()):
+    def invoke(self, monkeypatch, manifest_file, state_dir, gis=None, extra=(),
+               dry_run=True):
+        """Preflight-scoped by default: --dry-run stops before stage 1.
+
+        Stage 1 is covered in `test_master.py`, with fakes that can be copied.
+        """
         from click.testing import CliRunner
 
         from agol_provision import auth
@@ -436,7 +441,7 @@ class TestProvisionCommand:
         monkeypatch.setattr(auth, "connect", lambda profile: gis or FakeGIS())
         return CliRunner().invoke(main, [
             "provision", "--company", "CompanyA", "--location", "Moline",
-            "--manifest", str(manifest_file), *extra,
+            "--manifest", str(manifest_file), *(["--dry-run"] if dry_run else []), *extra,
         ])
 
     def test_a_clean_run_reports_the_plan_and_passes(self, monkeypatch, manifest_file, state_dir):
@@ -451,23 +456,14 @@ class TestProvisionCommand:
         assert "CompanyA_Moline_Design" in result.output
 
     def test_a_dry_run_writes_no_state_file(self, monkeypatch, manifest_file, state_dir):
-        result = self.invoke(monkeypatch, manifest_file, state_dir, extra=["--dry-run"])
+        result = self.invoke(monkeypatch, manifest_file, state_dir)
         assert result.exit_code == 0, result.output
         assert not state_dir.exists()
 
-    def test_a_real_run_records_that_preflight_completed(
-        self, monkeypatch, manifest_file, state_dir
-    ):
-        self.invoke(monkeypatch, manifest_file, state_dir)
-        import json
-
-        recorded = json.loads((state_dir / "companya-moline.json").read_text())
-        assert recorded["stages_completed"] == ["preflight"]
-        assert recorded["items"] == {}
-
     def test_a_failed_preflight_writes_no_state(self, monkeypatch, manifest_file, state_dir):
+        """A real run, not a dry one: preflight must gate stage 1's first write."""
         gis = FakeGIS(taken=["CompanyA_Moline"])
-        self.invoke(monkeypatch, manifest_file, state_dir, gis)
+        self.invoke(monkeypatch, manifest_file, state_dir, gis, dry_run=False)
         assert not state_dir.exists()
 
     def test_company_and_location_are_required_together(self, monkeypatch, state_dir):
@@ -479,10 +475,9 @@ class TestProvisionCommand:
         assert result.exit_code == 1
         assert "--location" in result.output
 
-    def test_it_says_plainly_that_nothing_was_created(
+    def test_a_dry_run_says_plainly_that_nothing_was_created(
         self, monkeypatch, manifest_file, state_dir
     ):
-        """Stages 1-2 do not exist yet; the output must not imply a built project."""
         result = self.invoke(monkeypatch, manifest_file, state_dir)
         assert "Nothing was created" in result.output
 

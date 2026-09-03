@@ -711,20 +711,26 @@ def spike_master(profile, master_id, keep, yes) -> None:
               help="Manifest to provision from. Defaults to the generated vsclr-standard.yaml.")
 @click.option("--service-name-override", default=None, metavar="STEM",
               help="Replace the derived service-name stem, when the standard one is taken.")
+@click.option("--destroy", "destroy_slug", default=None, metavar="SLUG",
+              help="Roll back a project: delete every item this tool recorded creating.")
 @click.option("--dry-run", is_flag=True,
               help="Print the plan and write nothing at all, not even run state.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt for --destroy.")
 @click.option("--profile", default="home", show_default=True,
               help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
-def provision(company, location, manifest_path, service_name_override, dry_run, profile) -> None:
+def provision(company, location, manifest_path, service_name_override, destroy_slug,
+              dry_run, yes, profile) -> None:
     """Provision a project from a manifest.
 
-    Runs stage 0 -- preflight -- and stops. Stages 1 (the master service) and 2
-    (its views) are not built yet, so this command currently creates nothing in
-    ArcGIS Online and is safe to re-run while the naming is still being settled.
+    Runs stage 0 (preflight) and stage 1 (the master feature service), then
+    stops. Stage 2, the views, is not built yet.
 
     Preflight is the gate on the one irreversible thing here: a hosted service
     name is reserved org-wide permanently, even after the service is deleted. A
     name that is already taken stops the run. Nothing is ever auto-renamed.
+
+    `--destroy SLUG` rolls a project back, deleting only the items recorded in
+    state, in reverse creation order.
     """
     from agol_provision.auth import AuthError, connect, describe
     from agol_provision.manifest import ManifestError, load_manifest
@@ -737,6 +743,10 @@ def provision(company, location, manifest_path, service_name_override, dry_run, 
         run_preflight,
     )
     from agol_provision.state import ProjectState, StateError
+
+    if destroy_slug:
+        _destroy(destroy_slug, profile=profile, yes=yes)
+        return
 
     if not company or not location:
         _fail("Both --company and --location are required, e.g. "
@@ -822,13 +832,149 @@ def provision(company, location, manifest_path, service_name_override, dry_run, 
     console.print("\n[bold green]PREFLIGHT PASSED[/bold green]")
     if dry_run:
         console.print("[dim]--dry-run: nothing was written, not even run state.[/dim]")
-    else:
-        state.complete_stage("preflight")
-        console.print(f"[dim]Preflight recorded in {state.path}[/dim]")
+        console.print("Nothing was created in ArcGIS Online.")
+        return
+
+    state.complete_stage("preflight")
+    _create_master(gis, manifest, ctx, state)
+    state.complete_stage("master")
+
     console.print(
-        "Stages 1 (master) and 2 (views) are not built yet. "
-        "Nothing was created in ArcGIS Online."
+        "\nStage 2 (views) is not built yet. The master exists; nothing else "
+        "was created."
     )
+
+
+def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
+    """Stage 1: copy the template master, name it, and put its indexes back."""
+    from agol_provision.master import APPLIED, FAILED, MasterError, reapply_user_indexes
+    from agol_provision.state import CreatedItem
+
+    spec = manifest.master
+    title = ctx.render_title(spec.title)
+    service_name = ctx.render_service_name(spec.service_name)
+
+    console.print("\n[bold]Stage 1 -- master[/bold]")
+    if state.has(spec.key):
+        existing = state.get(spec.key)
+        console.print(f"[dim]Already created as {existing.item_id}; skipping.[/dim]")
+        return
+
+    template = gis.content.get(spec.template_item_id)
+    console.print(f"Copying [cyan]{template.title}[/cyan] to [cyan]{service_name}[/cyan] "
+                  f"({len(template.layers)} layer(s), {len(template.tables)} table(s))...")
+    copy_item = copy_whole_service(template, service_name)
+    if copy_item is None:
+        _fail(f"copy_feature_layer_collection() returned None -- the copy failed. "
+              f"Nothing was recorded, so check the org for a partial service named "
+              f"{service_name} before re-running.")
+
+    # Recorded before anything else can fail. An item that exists in AGOL but not
+    # in state is the one failure mode that leaks an orphan.
+    state.record(CreatedItem(
+        key=spec.key, item_id=copy_item.itemid, item_type="Feature Service",
+        title=title, service_name=service_name,
+    ))
+    console.print(f"[green]Created[/green] {service_name} ({copy_item.itemid})")
+
+    # The copy names the item after the *service*, so without this the master's
+    # item title reads "CompanyA_Moline" rather than "CompanyA Moline".
+    copy_item.update(item_properties={
+        "title": title,
+        "description": (
+            f"Master feature service for {ctx.company} {ctx.location}, provisioned "
+            f"from template {template.title} ({spec.template_item_id})."
+        ),
+        "tags": [ctx.company, ctx.location],
+    })
+    console.print(f"Item title set to [cyan]{title}[/cyan]")
+
+    # The copy strips every index, so the ten user-defined ones go back by hand.
+    # `build_status_Index` is the one that matters: build_status is the field
+    # every view's definition query filters on.
+    try:
+        outcomes = reapply_user_indexes(template, copy_item)
+    except MasterError as exc:
+        err.print(f"Indexes were NOT reapplied: {exc}\nThe master exists and is "
+                  f"recorded. Fix the cause and reapply by hand, or --destroy and "
+                  f"re-run.")
+        return
+
+    if not outcomes:
+        console.print("[dim]No user-defined indexes to reapply.[/dim]")
+        return
+
+    failed = [o for o in outcomes if o.status == FAILED]
+    applied = [o for o in outcomes if o.status == APPLIED]
+    console.print(
+        f"Indexes: [green]{len(applied)} applied[/green], "
+        f"{len(outcomes) - len(applied) - len(failed)} already present, "
+        f"{len(failed)} failed"
+    )
+    for outcome in failed:
+        err.print(f"  index {outcome.index} on {outcome.layer} failed: {outcome.detail}")
+    if failed:
+        err.print("The master exists and is recorded. A missing index is a "
+                  "performance problem, not a correctness one -- every view's "
+                  "definition query still works.")
+
+
+def _destroy(slug: str, *, profile: str, yes: bool) -> None:
+    """Delete every item recorded for a project, in reverse creation order.
+
+    Reverse *recorded* order, not an assumed one: AGOL refuses to delete a
+    feature service while its views still exist. Only recorded items are ever
+    touched -- anything this tool merely found is left alone.
+    """
+    from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.state import ProjectState, StateError
+
+    path = STATE_DIR / f"{slug}.json"
+    if not path.exists():
+        _fail(f"No run state for {slug!r} at {path}. --destroy only deletes items this "
+              f"tool recorded creating, so there is nothing it can safely remove.")
+    try:
+        state = ProjectState.load(path)
+    except StateError as exc:
+        _fail(str(exc))
+
+    items = state.destroy_order()
+    if not items:
+        console.print(f"{slug} has no recorded items. Nothing to delete.")
+        return
+
+    try:
+        gis = connect(profile)
+    except AuthError as exc:
+        _fail(str(exc))
+
+    console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
+    console.print(f"\nThis deletes {len(items)} item(s) recorded for [cyan]{slug}[/cyan], "
+                  f"in reverse creation order:")
+    for item in items:
+        console.print(f"  {item.item_type:<16} {item.title}  [dim]({item.item_id})[/dim]")
+    console.print("\n[dim]Only these are touched. Anything this tool did not create is "
+                  "left alone.[/dim]")
+    if not yes:
+        click.confirm("Delete these?", abort=True)
+
+    for item in items:
+        obj = gis.content.get(item.item_id)
+        if obj is None:
+            console.print(f"[dim]{item.title} ({item.item_id}) is already gone.[/dim]")
+            state.forget(item.key)
+            continue
+        try:
+            obj.delete()
+        except Exception as exc:
+            err.print(f"Could not delete {item.title} ({item.item_id}): {exc}")
+            _fail("Stopped. Everything not yet deleted is still recorded, so re-running "
+                  "--destroy resumes from here.")
+        # Forgotten only after AGOL confirms the delete.
+        state.forget(item.key)
+        console.print(f"[green]Deleted[/green] {item.title}")
+
+    console.print(f"\n[green]{slug} rolled back.[/green]")
 
 
 if __name__ == "__main__":

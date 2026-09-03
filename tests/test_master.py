@@ -1,0 +1,607 @@
+"""Stage 1: the master service, and the indexes the copy drops.
+
+`copy_feature_layer_collection()` strips each layer's `indexes` before applying
+the definition, so a faithful copy still arrives without them. The spike measured
+83 missing index entries; 73 of those are system-generated names that could never
+have matched, and 10 are real. `build_status_Index` is the one that matters --
+`build_status` is the field every view's definition query filters on, so a master
+without it makes all seven views table-scan.
+
+Classification is therefore by *fields*, never by name: the system names carry
+random suffixes and owner ids, and `I25bore_depth` shows the `I##` prefix appears
+on user indexes too.
+"""
+
+import pytest
+
+from agol_provision.master import (
+    MasterError,
+    index_fields,
+    is_user_defined,
+    reapply_user_indexes,
+    system_field_names,
+    user_defined_indexes,
+)
+
+
+def idx(name, fields):
+    """One index as AGOL reports it -- `fields` is a comma-delimited string."""
+    return {"name": name, "fields": fields, "isUnique": False, "isAscending": True}
+
+
+def layer_props(name="redline", indexes=(), extra_fields=()):
+    """A layer definition carrying the system fields every hosted layer has."""
+    fields = [
+        {"name": "OBJECTID", "type": "esriFieldTypeOID"},
+        {"name": "GlobalID", "type": "esriFieldTypeGlobalID"},
+        {"name": "Shape", "type": "esriFieldTypeGeometry"},
+        {"name": "CreationDate", "type": "esriFieldTypeDate"},
+        {"name": "Creator", "type": "esriFieldTypeString"},
+        {"name": "EditDate", "type": "esriFieldTypeDate"},
+        {"name": "Editor", "type": "esriFieldTypeString"},
+        *({"name": f, "type": "esriFieldTypeString"} for f in extra_fields),
+    ]
+    return {
+        "name": name,
+        "objectIdField": "OBJECTID",
+        "globalIdField": "GlobalID",
+        "editFieldsInfo": {
+            "creationDateField": "CreationDate",
+            "creatorField": "Creator",
+            "editDateField": "EditDate",
+            "editorField": "Editor",
+        },
+        "fields": fields,
+        "indexes": list(indexes),
+    }
+
+
+# ---------------------------------------------------------------- fakes
+
+
+class FakeManager:
+    def __init__(self, raises=None):
+        self.calls = []
+        self._raises = raises
+
+    def add_to_definition(self, json_dict):
+        self.calls.append(json_dict)
+        if self._raises:
+            raise self._raises
+        return {"success": True}
+
+
+class FakeLayer:
+    def __init__(self, props, raises=None):
+        self.properties = props
+        self.manager = FakeManager(raises)
+
+
+class FakeFLC:
+    def __init__(self, layers=(), tables=()):
+        self.layers = list(layers)
+        self.tables = list(tables)
+
+
+# ---------------------------------------------------------------- classification
+
+
+class TestSystemFieldNames:
+    def test_collects_objectid_globalid_shape_and_editor_tracking(self):
+        assert system_field_names(layer_props()) == {
+            "objectid", "globalid", "shape", "creationdate", "creator", "editdate", "editor",
+        }
+
+    def test_a_plain_attribute_is_not_a_system_field(self):
+        assert "build_status" not in system_field_names(
+            layer_props(extra_fields=["build_status"])
+        )
+
+    def test_tolerates_a_layer_with_no_editor_tracking(self):
+        props = layer_props()
+        del props["editFieldsInfo"]
+        assert "objectid" in system_field_names(props)
+
+    def test_finds_a_shape_field_under_any_name(self):
+        """The geometry field is not always called Shape."""
+        props = layer_props()
+        props["fields"][2] = {"name": "SHAPE_1", "type": "esriFieldTypeGeometry"}
+        assert "shape_1" in system_field_names(props)
+
+
+class TestIndexFields:
+    def test_splits_the_comma_delimited_string(self):
+        assert index_fields(idx("i", "build_status,route_id")) == ["build_status", "route_id"]
+
+    def test_lowercases_and_strips(self):
+        assert index_fields(idx("i", " Build_Status , Route_ID ")) == ["build_status", "route_id"]
+
+    def test_tolerates_a_list_instead_of_a_string(self):
+        assert index_fields(idx("i", ["build_status"])) == ["build_status"]
+
+
+class TestIsUserDefined:
+    """The spec's own classification table, case by case."""
+
+    @pytest.fixture
+    def system(self):
+        return system_field_names(layer_props(extra_fields=["build_status", "bore_depth"]))
+
+    @pytest.mark.parametrize("name,fields", [
+        ("build_status_Index", "build_status"),
+        ("I25bore_depth", "bore_depth"),
+    ])
+    def test_keeps_the_ten_real_ones(self, name, fields, system):
+        assert is_user_defined(idx(name, fields), system)
+
+    @pytest.mark.parametrize("name,fields", [
+        ("PK__ZAYO_CHI__F4B70D85A1B2C3D4", "OBJECTID"),
+        ("user_57996.ZAYO_CHICAGO_REDLINE_Shape_sidx", "Shape"),
+        ("FDO_GlobalID", "GlobalID"),
+        ("GlobalID_Index", "GlobalID"),
+        ("I13Creator", "Creator"),
+        ("I14CreationDate", "CreationDate"),
+        ("I15Editor", "Editor"),
+        ("I16EditDate", "EditDate"),
+    ])
+    def test_drops_the_system_generated_ones(self, name, fields, system):
+        assert not is_user_defined(idx(name, fields), system)
+
+    def test_classifies_by_fields_not_by_name(self):
+        """The decisive case: a user-looking name over a system field is still system.
+
+        Names carry random suffixes and owner ids, and `I25bore_depth` proves the
+        `I##` prefix appears on user indexes too, so the name cannot be trusted
+        either way.
+        """
+        system = system_field_names(layer_props())
+        assert not is_user_defined(idx("build_status_Index", "OBJECTID"), system)
+
+    def test_keeps_a_composite_index_that_includes_a_system_field(self):
+        """Only an index that is *exactly* one system field is system-generated."""
+        system = system_field_names(layer_props(extra_fields=["build_status"]))
+        assert is_user_defined(idx("compound", "build_status,OBJECTID"), system)
+
+
+class TestUserDefinedIndexes:
+    def test_returns_only_the_user_indexes_of_one_layer(self):
+        props = layer_props(
+            extra_fields=["build_status"],
+            indexes=[
+                idx("PK__ZAYO_CHI__99", "OBJECTID"),
+                idx("build_status_Index", "build_status"),
+                idx("FDO_GlobalID", "GlobalID"),
+            ],
+        )
+        assert [i["name"] for i in user_defined_indexes(props)] == ["build_status_Index"]
+
+    def test_a_layer_with_no_indexes_yields_nothing(self):
+        assert user_defined_indexes(layer_props()) == []
+
+
+# ---------------------------------------------------------------- reapplication
+
+
+def template_and_copy(indexes, copy_indexes=(), name="redline", raises=None):
+    """A template layer carrying `indexes`, and the freshly copied layer."""
+    template = FakeLayer(layer_props(name, indexes, extra_fields=["build_status"]))
+    copy = FakeLayer(
+        layer_props(name, copy_indexes, extra_fields=["build_status"]), raises=raises
+    )
+    return FakeFLC([template]), FakeFLC([copy]), copy
+
+
+class TestReapplyUserIndexes:
+    def test_applies_the_user_indexes_and_nothing_else(self):
+        tpl, new, copy = template_and_copy([
+            idx("PK__ZAYO_CHI__99", "OBJECTID"),
+            idx("build_status_Index", "build_status"),
+        ])
+        outcomes = reapply_user_indexes(tpl, new)
+        assert copy.manager.calls == [{"indexes": [idx("build_status_Index", "build_status")]}]
+        assert [(o.index, o.status) for o in outcomes] == [("build_status_Index", "applied")]
+
+    def test_batches_one_call_per_layer(self):
+        tpl, new, copy = template_and_copy([
+            idx("build_status_Index", "build_status"),
+            idx("I25bore_depth", "bore_depth"),
+        ])
+        reapply_user_indexes(tpl, new)
+        assert len(copy.manager.calls) == 1
+        assert len(copy.manager.calls[0]["indexes"]) == 2
+
+    def test_makes_no_call_for_a_layer_with_no_user_indexes(self):
+        tpl, new, copy = template_and_copy([idx("FDO_GlobalID", "GlobalID")])
+        assert reapply_user_indexes(tpl, new) == []
+        assert copy.manager.calls == []
+
+    def test_skips_an_index_the_copy_already_carries(self):
+        tpl, new, copy = template_and_copy(
+            [idx("build_status_Index", "build_status")],
+            copy_indexes=[idx("build_status_Index", "build_status")],
+        )
+        outcomes = reapply_user_indexes(tpl, new)
+        assert copy.manager.calls == []
+        assert [o.status for o in outcomes] == ["already present"]
+
+    def test_tolerates_a_duplicate_error_from_agol(self):
+        """The spec calls these tolerated rather than fatal."""
+        tpl, new, copy = template_and_copy(
+            [idx("build_status_Index", "build_status")],
+            raises=RuntimeError("Duplicate index name build_status_Index"),
+        )
+        outcomes = reapply_user_indexes(tpl, new)
+        assert [o.status for o in outcomes] == ["already present"]
+
+    def test_reports_a_genuine_failure_without_raising(self):
+        """One bad layer must not abandon the other seventeen."""
+        tpl, new, copy = template_and_copy(
+            [idx("build_status_Index", "build_status")],
+            raises=RuntimeError("Invalid definition"),
+        )
+        outcomes = reapply_user_indexes(tpl, new)
+        assert [o.status for o in outcomes] == ["failed"]
+        assert "Invalid definition" in outcomes[0].detail
+
+    def test_covers_tables_as_well_as_layers(self):
+        tpl_layer = FakeLayer(layer_props("redline", [], extra_fields=["build_status"]))
+        tpl_table = FakeLayer(
+            layer_props("notes", [idx("note_idx", "build_status")], extra_fields=["build_status"])
+        )
+        copy_layer = FakeLayer(layer_props("redline", [], extra_fields=["build_status"]))
+        copy_table = FakeLayer(layer_props("notes", [], extra_fields=["build_status"]))
+        outcomes = reapply_user_indexes(
+            FakeFLC([tpl_layer], [tpl_table]), FakeFLC([copy_layer], [copy_table])
+        )
+        assert [o.index for o in outcomes] == ["note_idx"]
+        assert len(copy_table.manager.calls) == 1
+
+    def test_refuses_to_apply_anything_if_the_layers_do_not_line_up(self):
+        """Applying an index to the wrong layer is a silent wrong answer.
+
+        The copy is made with positional indexes into `Item.layers`, so position
+        is the correspondence -- but it is checked, not assumed.
+        """
+        tpl = FakeFLC([FakeLayer(layer_props("redline", [idx("i", "build_status")]))])
+        copy = FakeLayer(layer_props("something_else"))
+        with pytest.raises(MasterError, match="do not line up"):
+            reapply_user_indexes(tpl, FakeFLC([copy]))
+        assert copy.manager.calls == []
+
+    def test_refuses_when_the_copy_has_a_different_layer_count(self):
+        tpl = FakeFLC([FakeLayer(layer_props("a")), FakeLayer(layer_props("b"))])
+        with pytest.raises(MasterError):
+            reapply_user_indexes(tpl, FakeFLC([FakeLayer(layer_props("a"))]))
+
+
+# ---------------------------------------------------------------- the command
+
+import json
+
+import pytest as _pytest  # noqa: F811  (already imported; kept local to this section)
+
+from agol_provision.auth import REQUIRED_PRIVILEGES
+
+TEMPLATE_MASTER = "1" * 32
+TEMPLATE_VIEW = "2" * 32
+
+
+class FakeService:
+    """A Feature Service item: enough of it for stage 1 and for --destroy."""
+
+    def __init__(self, itemid, title, layer_names=("redline",), registry=None,
+                 typeKeywords=("Hosted Service",), indexes=None, copy_returns=True):
+        self.itemid = itemid
+        self.title = title
+        self.type = "Feature Service"
+        self.typeKeywords = list(typeKeywords)
+        self.layers = [
+            FakeLayer(layer_props(n, indexes or [], extra_fields=["build_status"]))
+            for n in layer_names
+        ]
+        self.tables = []
+        self.updates = []
+        self.deleted = False
+        self.copy_calls = []
+        self._registry = registry if registry is not None else {}
+        self._copy_returns = copy_returns
+        self._registry[itemid] = self
+
+    def copy_feature_layer_collection(self, service_name, layers=None, tables=None):
+        self.copy_calls.append({"service_name": service_name, "layers": layers, "tables": tables})
+        if not self._copy_returns:
+            return None
+        # The copy is named after the *service*, and arrives with no indexes.
+        return FakeService(
+            itemid="c" * 32, title=service_name,
+            layer_names=[layer.properties["name"] for layer in self.layers],
+            registry=self._registry,
+        )
+
+    def update(self, item_properties=None, **kwargs):
+        props = item_properties or kwargs
+        self.updates.append(props)
+        self.title = props.get("title", self.title)
+        return True
+
+    def delete(self):
+        self.deleted = True
+        return True
+
+
+class FakeContent:
+    def __init__(self, registry, taken=()):
+        self._registry = registry
+        self._taken = set(taken)
+        self.queries = []
+
+    def get(self, item_id):
+        return self._registry.get(item_id)
+
+    def is_service_name_available(self, service_name, service_type):
+        self.queries.append(service_name)
+        return service_name not in self._taken
+
+
+class FakeGIS:
+    def __init__(self, registry, taken=()):
+        self.content = FakeContent(registry, taken)
+        self.users = type("U", (), {"me": type("M", (), {
+            "privileges": list(REQUIRED_PRIVILEGES),
+            "username": "tester", "role": "org_admin"})()})()
+        self.url = "https://example.maps.arcgis.com"
+
+
+class TestProvisionStage1:
+    """Stage 1 creates one service. Everything about it should be checkable."""
+
+    @_pytest.fixture(autouse=True)
+    def wide_terminal(self, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "200")
+
+    @_pytest.fixture
+    def registry(self):
+        return {}
+
+    @_pytest.fixture
+    def template(self, registry):
+        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
+                    typeKeywords=["View Service"])
+        return FakeService(
+            TEMPLATE_MASTER, "Zayo Chicago", layer_names=["redline", "bores"],
+            registry=registry,
+            indexes=[idx("build_status_Index", "build_status"),
+                     idx("PK__ZAYO__99", "OBJECTID")],
+        )
+
+    @_pytest.fixture
+    def manifest_file(self, tmp_path):
+        import yaml
+
+        path = tmp_path / "m.yaml"
+        path.write_text(yaml.safe_dump({
+            "name": "test", "version": 1, "source_org": "https://example.maps.arcgis.com",
+            "master": {"key": "master", "template_item_id": TEMPLATE_MASTER,
+                       "title": "{base}", "service_name": "{base_sn}"},
+            "views": [{"key": "design", "template_item_id": TEMPLATE_VIEW,
+                       "title": "{base} - Design View", "service_name": "{base_sn}_Design"}],
+        }))
+        return path
+
+    @_pytest.fixture
+    def state_dir(self, tmp_path, monkeypatch):
+        from agol_provision import cli
+
+        d = tmp_path / "state"
+        monkeypatch.setattr(cli, "STATE_DIR", d)
+        return d
+
+    def invoke(self, monkeypatch, manifest_file, state_dir, gis, extra=()):
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        monkeypatch.setattr(auth, "connect", lambda profile: gis)
+        return CliRunner().invoke(main, [
+            "provision", "--company", "CompanyA", "--location", "Moline",
+            "--manifest", str(manifest_file), *extra,
+        ])
+
+    def state(self, state_dir):
+        return json.loads((state_dir / "companya-moline.json").read_text())
+
+    def test_creates_the_master_under_the_preflight_approved_name(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 0, result.output
+        assert template.copy_calls[0]["service_name"] == "CompanyA_Moline"
+
+    def test_copies_every_layer_and_table_by_positional_index(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """`copy_feature_layer_collection` copies a subset and raises on None."""
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert template.copy_calls[0]["layers"] == [0, 1]
+        assert template.copy_calls[0]["tables"] == []
+
+    def test_sets_the_item_title_to_the_display_name(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """The copy names the item after the service, so this is not cosmetic."""
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        copy = registry["c" * 32]
+        assert copy.updates[0]["title"] == "CompanyA Moline"
+
+    def test_reapplies_the_user_index_and_not_the_system_one(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        applied = [
+            i["name"]
+            for layer in registry["c" * 32].layers
+            for call in layer.manager.calls
+            for i in call["indexes"]
+        ]
+        assert applied == ["build_status_Index", "build_status_Index"]
+
+    def test_records_the_master_and_completes_the_stage(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        recorded = self.state(state_dir)
+        assert recorded["stages_completed"] == ["preflight", "master"]
+        assert recorded["items"]["master"]["item_id"] == "c" * 32
+        assert recorded["items"]["master"]["service_name"] == "CompanyA_Moline"
+
+    def test_a_dry_run_creates_nothing(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry), ["--dry-run"])
+        assert template.copy_calls == []
+
+    def test_a_failed_preflight_creates_nothing(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        gis = FakeGIS(registry, taken=["CompanyA_Moline"])
+        result = self.invoke(monkeypatch, manifest_file, state_dir, gis)
+        assert result.exit_code == 1
+        assert template.copy_calls == []
+
+    def test_a_resume_does_not_create_the_master_twice(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """The one failure mode that leaks an orphaned service."""
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert len(template.copy_calls) == 1
+
+    def test_a_copy_returning_none_fails_loudly(
+        self, monkeypatch, manifest_file, state_dir, registry
+    ):
+        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
+                    typeKeywords=["View Service"])
+        FakeService(TEMPLATE_MASTER, "Zayo Chicago", registry=registry, copy_returns=False)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 1
+        assert "returned None" in result.output
+
+    def test_index_failures_are_reported_without_losing_the_master(
+        self, monkeypatch, manifest_file, state_dir, registry, template, monkeypatch_fail=None
+    ):
+        """A master that exists with a missing index beats no record of a master."""
+        from agol_provision import master as master_mod
+
+        monkeypatch.setattr(
+            master_mod, "reapply_user_indexes",
+            lambda t, n: [master_mod.IndexOutcome("redline", "build_status_Index",
+                                                  master_mod.FAILED, "boom")],
+        )
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert self.state(state_dir)["items"]["master"]["item_id"] == "c" * 32
+        assert "build_status_Index" in result.output
+
+
+class TestDestroy:
+    """Rollback deletes what this tool recorded, in reverse, and nothing else."""
+
+    @_pytest.fixture(autouse=True)
+    def wide_terminal(self, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "200")
+
+    @_pytest.fixture
+    def state_dir(self, tmp_path, monkeypatch):
+        from agol_provision import cli
+
+        d = tmp_path / "state"
+        monkeypatch.setattr(cli, "STATE_DIR", d)
+        return d
+
+    @_pytest.fixture
+    def built(self, state_dir):
+        """A recorded project: a master, then a view created after it."""
+        from agol_provision.state import CreatedItem, ProjectState
+
+        registry = {}
+        master = FakeService("a" * 32, "CompanyA Moline", registry=registry)
+        view = FakeService("b" * 32, "CompanyA Moline - Design View", registry=registry)
+        state = ProjectState.load_or_create(
+            state_dir=state_dir, slug="companya-moline", company="CompanyA",
+            location="Moline", manifest_name="test", manifest_version=1,
+        )
+        for key, item in (("master", master), ("design", view)):
+            state.record(CreatedItem(key=key, item_id=item.itemid,
+                                     item_type="Feature Service", title=item.title))
+        return registry, master, view
+
+    def destroy(self, monkeypatch, registry, extra=()):
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        return CliRunner().invoke(
+            main, ["provision", "--destroy", "companya-moline", *extra], input="y\n"
+        )
+
+    def test_deletes_every_recorded_item(self, monkeypatch, built):
+        registry, master, view = built
+        result = self.destroy(monkeypatch, registry, ["--yes"])
+        assert result.exit_code == 0, result.output
+        assert master.deleted and view.deleted
+
+    def test_deletes_views_before_the_master_they_depend_on(self, monkeypatch, built):
+        """AGOL refuses to delete a feature service while its views still exist."""
+        registry, master, view = built
+        order = []
+        for item in (master, view):
+            item.delete = (lambda i=item: (order.append(i.itemid), True)[1])
+        self.destroy(monkeypatch, registry, ["--yes"])
+        assert order == ["b" * 32, "a" * 32]
+
+    def test_leaves_nothing_recorded_afterwards(self, monkeypatch, built, state_dir):
+        registry, _, _ = built
+        self.destroy(monkeypatch, registry, ["--yes"])
+        recorded = json.loads((state_dir / "companya-moline.json").read_text())
+        assert recorded["items"] == {} and recorded["stages_completed"] == []
+
+    def test_never_touches_an_item_it_did_not_record(self, monkeypatch, built):
+        registry, _, _ = built
+        bystander = FakeService("f" * 32, "Someone else's service", registry=registry)
+        self.destroy(monkeypatch, registry, ["--yes"])
+        assert not bystander.deleted
+
+    def test_asks_before_deleting_anything(self, monkeypatch, built):
+        registry, master, view = built
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        result = CliRunner().invoke(
+            main, ["provision", "--destroy", "companya-moline"], input="n\n"
+        )
+        assert not master.deleted and not view.deleted
+        assert result.exit_code != 0
+
+    def test_an_unknown_slug_fails_rather_than_doing_nothing_quietly(
+        self, monkeypatch, state_dir
+    ):
+        result = self.destroy(monkeypatch, {}, ["--yes"])
+        assert result.exit_code == 1
+        assert "companya-moline" in result.output
+
+    def test_a_failed_delete_keeps_the_item_recorded(self, monkeypatch, built):
+        """Forgetting an item that still exists would orphan it silently."""
+        registry, master, view = built
+
+        def boom():
+            raise RuntimeError("still has dependencies")
+
+        master.delete = boom
+        result = self.destroy(monkeypatch, registry, ["--yes"])
+        assert result.exit_code == 1
+        assert "still has dependencies" in result.output

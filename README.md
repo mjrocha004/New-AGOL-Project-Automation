@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 331 tests pass, none needing network access.
+the master schema copies faithfully. 378 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -28,10 +28,11 @@ to answer are settled:
   seven, so that path is not needed at all.
 
 Provisioning is being built in stage order against
-`docs/phase-2-master-and-views.md`. **Stage 0, preflight, is in** — `provision`
-resolves the templates, renders every name, and refuses to go on if a service
-name is already taken. Stages 1 (master) and 2 (views) come next. Nothing is
-created in ArcGIS Online yet.
+`docs/phase-2-master-and-views.md`. **Stages 0 (preflight) and 1 (master) are
+in** — `provision` resolves the templates, renders every name, refuses to go on
+if a service name is already taken, then copies the master and reapplies the
+indexes the copy drops. `--destroy` rolls it back. Stage 2, the views, comes
+next.
 
 ## Setup
 
@@ -94,8 +95,9 @@ Exits non-zero on failure.
 ## Commands
 
 All read-only except `spike-master`, which creates and deletes one service and
-asks first. `provision` will write once stages 1 and 2 land; today it runs
-preflight and stops, so it too only reads.
+asks first, and `provision`, which creates the master feature service (and,
+with `--destroy`, deletes what it recorded creating). `provision --dry-run` is
+read-only.
 
 | Command | Purpose |
 | --- | --- |
@@ -105,7 +107,7 @@ preflight and stops, so it too only reads.
 | `discover` | Audit the templates; write the manifest, snapshots, and report. |
 | `preview` | Show every name a manifest would produce. No connection needed. |
 | `spike-master` | Test whether the master schema copies faithfully. |
-| `provision` | Provision a project. Currently runs preflight and stops. |
+| `provision` | Provision a project: preflight, then the master service. |
 | `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
 
 ## Phase 0 — run these, then send back the output
@@ -252,19 +254,30 @@ inspection.
 > reuses one fixed name so it only ever burns that one.
 
 **What it touches.** The template is only ever read. The command creates exactly
-one new feature service, and the single `delete()` call in this codebase targets
-that newly created item and nothing else. That is checked rather than assumed:
+one new feature service, and its `delete()` targets that newly created item and
+nothing else. That is checked rather than assumed:
 `safety.py` refuses the delete if the item is the template, lacks the
 `ZZZ_SPIKE_TEST_` prefix, or is not the service the copy returned — leaving it in
 place instead. A leftover test service is a ten-second cleanup; a wrongly deleted
 service is not. Pass `--keep` to skip the delete entirely.
 
+> The codebase has exactly two `delete()` calls — this one and `provision
+> --destroy` — and a test fails the build if a third appears anywhere. Each is
+> guarded differently: this one by `safety.py`, the other by run state, which can
+> only name items the tool recorded creating.
+
 ## Phase 2 — provisioning
 
-Built in stage order. **Stage 0, preflight, is the only stage that exists so
-far** — it reads, reports, and stops. Stages 1 (the master feature service) and 2
-(its views) come next; stages 3–6 (groups, maps, apps, sharing) stay manual for
-now.
+Built in stage order. **Stages 0 (preflight) and 1 (the master feature service)
+are in.** Stage 2, the views, comes next; stages 3–6 (groups, maps, apps,
+sharing) stay manual for now.
+
+```bat
+python -m agol_provision.cli provision --company CompanyA --location Moline
+```
+
+Runs preflight, creates the master, and stops. Add `--dry-run` to stop after
+preflight without writing anything.
 
 ### Preflight
 
@@ -309,6 +322,55 @@ Drop `--dry-run` to record that preflight passed in `state/<slug>.json`. Nothing
 is created in ArcGIS Online either way until stage 1 exists. Groups, maps, and
 apps appear in the plan marked `not in this build`; their `share_to` entries are
 still validated when the manifest loads, just not acted on.
+
+### The master service
+
+Stage 1 copies the template master with `copy_feature_layer_collection()`, which
+Phase 0b proved carries every layer, table, field, field type, domain, attachment
+setting, and editor-tracking setting intact. Two things it does not do on its
+own, which this stage handles:
+
+**The item title.** The copy names the item after the *service*, so without a
+follow-up the master's title reads `CompanyA_Moline` rather than `CompanyA
+Moline`. Stage 1 sets the title, a description naming the template it came from,
+and tags.
+
+**The indexes.** `copy_feature_layer_collection()` strips each layer's `indexes`
+before applying the definition, so even a perfect copy arrives without them. The
+spike reported 83 missing index entries; 73 are system-generated names that could
+never have matched, and 10 are real — `build_status_Index` on 9 layers and
+`I25bore_depth` on 1. `build_status_Index` is the one that matters: `build_status`
+is the field every view's definition query filters on, so a master without it
+makes all seven views table-scan.
+
+Indexes are classified by their **fields**, never by their names. An index is
+treated as system-generated when its fields are exactly one system field — the
+object id, the global id, the geometry field, or an editor-tracking field. The
+system names carry random suffixes and owner ids, and `I25bore_depth` shows the
+`I##` prefix appears on user indexes too, so a name proves nothing either way. A
+duplicate-index error from AGOL is tolerated rather than fatal.
+
+The new master is **schema only, with no features** — nothing copies data.
+
+A failed index is reported but does not lose the master: the item is recorded in
+state before anything else can fail, because an item that exists in AGOL but not
+in state is the one failure mode that leaks an orphan. A missing index is a
+performance problem, not a correctness one.
+
+### Rolling a project back
+
+```bat
+python -m agol_provision.cli provision --destroy companya-moline
+```
+
+Deletes every item recorded in `state/<slug>.json`, in **reverse recorded
+creation order** — not an assumed order, which matters because AGOL refuses to
+delete a feature service while its views still exist. It lists what it will
+delete and asks first; `--yes` skips the prompt.
+
+Only recorded items are reachable, so nothing this tool merely found can be
+touched. A delete that fails stops the run with the remaining items still
+recorded, so re-running resumes from there rather than orphaning them.
 
 ## Signing in
 

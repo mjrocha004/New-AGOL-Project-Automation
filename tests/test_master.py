@@ -768,3 +768,133 @@ class TestDestroy:
         result = self.destroy(monkeypatch, registry, ["--yes"])
         assert result.exit_code == 1
         assert "still has dependencies" in result.output
+
+
+class TestInspectIndexes:
+    """A read-only view of what the classifier keeps and what the copy is missing.
+
+    This is the spec's live-verification step -- "build_status_Index present on
+    all 9 redline layers" -- made runnable instead of done by eye in the AGOL UI.
+    """
+
+    @_pytest.fixture(autouse=True)
+    def wide_terminal(self, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "200")
+
+    @_pytest.fixture
+    def state_dir(self, tmp_path, monkeypatch):
+        from agol_provision import cli
+
+        d = tmp_path / "state"
+        monkeypatch.setattr(cli, "STATE_DIR", d)
+        return d
+
+    @_pytest.fixture
+    def manifest_file(self, tmp_path):
+        import yaml
+
+        path = tmp_path / "m.yaml"
+        path.write_text(yaml.safe_dump({
+            "name": "test", "version": 1, "source_org": "https://example.maps.arcgis.com",
+            "master": {"key": "master", "template_item_id": TEMPLATE_MASTER,
+                       "title": "{base}", "service_name": "{base_sn}"},
+            "views": [],
+        }))
+        return path
+
+    @_pytest.fixture
+    def org(self, state_dir):
+        """A template carrying two user indexes, and a copy missing one of them."""
+        from agol_provision.state import CreatedItem, ProjectState
+
+        registry = {}
+        FakeService(
+            TEMPLATE_MASTER, "Zayo Chicago", layer_names=["Pole_Redline", "Span_Redline"],
+            registry=registry,
+            indexes=[idx("build_status_Index", "build_status"),
+                     idx("PK__ZAYO__99", "OBJECTID")],
+        )
+        copy = FakeService("c" * 32, "TestCompany Silvis",
+                           layer_names=["Pole_Redline", "Span_Redline"], registry=registry)
+        # Span_Redline got its index; Pole_Redline did not -- the live symptom.
+        copy.layers[1].properties["indexes"] = [idx("build_status_Index", "build_status")]
+
+        state = ProjectState.load_or_create(
+            state_dir=state_dir, slug="testcompany-silvis", company="TestCompany",
+            location="Silvis", manifest_name="test", manifest_version=1,
+        )
+        state.record(CreatedItem(key="master", item_id="c" * 32,
+                                 item_type="Feature Service", title="TestCompany Silvis",
+                                 service_name="TestCompany_Silvis"))
+        return registry, copy
+
+    def invoke(self, monkeypatch, manifest_file, registry, extra=()):
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        return CliRunner().invoke(main, [
+            "inspect-indexes", "--slug", "testcompany-silvis",
+            "--manifest", str(manifest_file), *extra,
+        ])
+
+    def test_command_exists(self):
+        from agol_provision.cli import main
+
+        assert "inspect-indexes" in main.commands
+
+    def test_lists_what_the_classifier_keeps_and_drops_the_rest(
+        self, monkeypatch, manifest_file, org
+    ):
+        registry, _ = org
+        result = self.invoke(monkeypatch, manifest_file, registry)
+        assert result.exit_code == 0, result.output
+        assert "build_status_Index" in result.output
+        assert "PK__ZAYO__99" not in result.output
+
+    def test_names_the_layers_whose_index_is_missing_from_the_copy(
+        self, monkeypatch, manifest_file, org
+    ):
+        registry, _ = org
+        result = self.invoke(monkeypatch, manifest_file, registry)
+        assert "Pole_Redline" in result.output
+        assert "MISSING" in result.output
+
+    def test_says_so_when_nothing_is_missing(self, monkeypatch, manifest_file, org):
+        registry, copy = org
+        copy.layers[0].properties["indexes"] = [idx("build_status_Index", "build_status")]
+        result = self.invoke(monkeypatch, manifest_file, registry)
+        assert "MISSING" not in result.output
+
+    def test_writes_nothing(self, monkeypatch, manifest_file, org):
+        """Read-only: it must be safe to run against a live project any time."""
+        registry, copy = org
+        self.invoke(monkeypatch, manifest_file, registry)
+        assert all(layer.manager.calls == [] for layer in copy.layers)
+        assert not copy.updates and not copy.deleted
+
+    def test_focusing_one_layer_shows_the_fields_the_decision_used(
+        self, monkeypatch, manifest_file, org
+    ):
+        """The classification is by fields, so the fields are what to inspect."""
+        registry, _ = org
+        result = self.invoke(monkeypatch, manifest_file, registry,
+                             ["--layer", "Pole_Redline"])
+        assert "build_status" in result.output
+        assert "objectid" in result.output.lower()
+
+    def test_an_unknown_slug_fails_clearly(self, monkeypatch, manifest_file, org):
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        registry, _ = org
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        result = CliRunner().invoke(main, [
+            "inspect-indexes", "--slug", "nope", "--manifest", str(manifest_file),
+        ])
+        assert result.exit_code == 1
+        assert "nope" in result.output

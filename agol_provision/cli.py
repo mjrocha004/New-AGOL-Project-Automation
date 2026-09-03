@@ -1003,5 +1003,125 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
     console.print(f"\n[green]{slug} rolled back.[/green]")
 
 
+@main.command("inspect-indexes")
+@click.option("--slug", required=True, metavar="SLUG",
+              help="Project slug, e.g. testcompany-silvis. Reads state/<slug>.json.")
+@click.option("--manifest", "manifest_path", type=click.Path(exists=True), default=None,
+              help="Manifest holding the template master id. Defaults to vsclr-standard.yaml.")
+@click.option("--layer", "focus", default=None, metavar="NAME",
+              help="Show one layer in detail: the fields the classification used.")
+@click.option("--profile", default="home", show_default=True,
+              help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
+def inspect_indexes(slug, manifest_path, focus, profile) -> None:
+    """Compare a provisioned master's indexes against its template.
+
+    Read-only. Shows which indexes the tool classifies as user-defined, and which
+    of those the copy is still missing -- the check the spec calls for by hand
+    ("build_status_Index present on all 9 redline layers"), and the first thing to
+    run when an index fails to reapply.
+
+    Classification is by fields, so `--layer` prints the fields the decision was
+    made from: which the layer treats as system, and which it exposes at all.
+    """
+    import json
+
+    from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.manifest import ManifestError, load_manifest
+    from agol_provision.master import (
+        indexable_field_names,
+        system_field_names,
+        user_defined_indexes,
+    )
+
+    state_path = STATE_DIR / f"{slug}.json"
+    if not state_path.exists():
+        _fail(f"No run state for {slug!r} at {state_path}. Provision the project first, "
+              f"or check the slug.")
+    recorded = json.loads(state_path.read_text()).get("items", {}).get("master")
+    if not recorded:
+        _fail(f"{slug!r} has no master recorded. Nothing to inspect.")
+
+    path = Path(manifest_path) if manifest_path else (
+        REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
+    )
+    try:
+        manifest = load_manifest(path)
+    except ManifestError as exc:
+        _fail(str(exc))
+
+    try:
+        gis = connect(profile)
+    except AuthError as exc:
+        _fail(str(exc))
+
+    template = gis.content.get(manifest.master.template_item_id)
+    if template is None:
+        _fail(f"Template master {manifest.master.template_item_id} is not visible.")
+    copy_item = gis.content.get(recorded["item_id"])
+    if copy_item is None:
+        _fail(f"{recorded['title']} ({recorded['item_id']}) is recorded but not in the "
+              f"org -- it was deleted by hand.")
+
+    def parts(item):
+        return list(item.layers) + list(item.tables)
+
+    console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
+    console.print(f"Template: [cyan]{template.title}[/cyan] ({template.itemid})")
+    console.print(f"Copy:     [cyan]{copy_item.title}[/cyan] ({copy_item.itemid})\n")
+
+    by_name = {layer.properties.get("name"): layer for layer in parts(copy_item)}
+
+    table = Table(title="User-defined indexes, by layer")
+    for col in ("Layer", "Index", "Fields", "On the copy"):
+        table.add_column(col, overflow="fold")
+
+    kept = missing = 0
+    for layer in parts(template):
+        name = layer.properties.get("name")
+        counterpart = by_name.get(name)
+        present = {
+            str(i.get("name", "")).lower()
+            for i in ((counterpart.properties.get("indexes") if counterpart else []) or [])
+        }
+        for index in user_defined_indexes(layer.properties):
+            kept += 1
+            here = str(index.get("name", "")).lower() in present
+            missing += 0 if here else 1
+            table.add_row(
+                name, index.get("name"), str(index.get("fields")),
+                "[green]yes[/green]" if here else "[bold red]MISSING[/bold red]",
+            )
+
+    console.print(table)
+    console.print(f"\n{kept} user-defined index(es) in the template; "
+                  f"{kept - missing} present on the copy, "
+                  f"{'[bold red]' if missing else ''}{missing} missing"
+                  f"{'[/bold red]' if missing else ''}.")
+    if missing:
+        console.print("[dim]Re-run `provision` for this project to reapply the missing "
+                      "ones -- it repairs in place rather than creating a second "
+                      "service.[/dim]")
+
+    if not focus:
+        return
+
+    template_layer = next((l for l in parts(template) if l.properties.get("name") == focus), None)
+    if template_layer is None:
+        _fail(f"No layer named {focus!r}. Names are listed above.")
+    copy_layer = by_name.get(focus)
+
+    console.print(f"\n[bold]{focus}[/bold] -- the fields the classification used")
+    console.print(f"  system fields   : {sorted(system_field_names(template_layer.properties))}")
+    console.print(f"  exposed fields  : {sorted(indexable_field_names(template_layer.properties))}")
+    console.print(f"  every index     : "
+                  f"{[i.get('name') for i in (template_layer.properties.get('indexes') or [])]}")
+    console.print(f"  kept as user    : {user_defined_indexes(template_layer.properties)}")
+    if copy_layer is not None:
+        console.print(f"  copy layer id   : {copy_layer.properties.get('id')}")
+        console.print(f"  copy layer url  : {getattr(copy_layer, 'url', '?')}")
+        console.print(f"  copy indexes    : "
+                      f"{[i.get('name') for i in (copy_layer.properties.get('indexes') or [])]}")
+
+
 if __name__ == "__main__":
     main()

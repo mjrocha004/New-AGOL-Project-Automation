@@ -450,13 +450,13 @@ class FakeService:
         self.copy_calls.append({"service_name": service_name, "layers": layers, "tables": tables})
         if not self._copy_returns:
             return None
-        # The copy is named after the *service*, and arrives with no indexes.
-        # Layer ids are preserved: a schema copy keeps them, and the views stage
-        # matches the master's layers by id.
+        # The copy is named after the *service*, arrives with no indexes, and
+        # RENUMBERS the layers: ids do not survive copy_feature_layer_collection.
+        # Names do, which is why the views stage matches on them.
         return FakeService(
             itemid="c" * 32, title=service_name,
             layer_names=[layer.properties["name"] for layer in self.layers],
-            layer_ids=[layer.properties["id"] for layer in self.layers],
+            layer_ids=list(range(len(self.layers))),
             registry=self._registry,
         )
 

@@ -409,11 +409,13 @@ manifest means editing a template view in AGOL propagates to the next project
 with no manifest edit. Two template views changed capabilities between two
 discovery runs; nothing had to be done about it.
 
-Layers are matched to the master **by layer id**, not by position — the master's
-17 layers carry ids running past 17, and the seven views each expose a different
-subset, from 2 layers to 18. The name is checked against the id rather than
-trusted: a view built over the wrong layer shows the wrong data to whoever the
-view is shared with.
+Layers are matched to the master **by name**. Layer *ids* do not correspond: a
+template view's layer id 11 is `Redline_Details`, while id 11 on the new master
+is `Pole_Design`, because the schema copy renumbers the master's layers. Names
+survive the copy — stage 1 verifies that on every layer before it touches an
+index — so names are the only stable key. A view built over the wrong layer shows
+the wrong data to whoever the view is shared with, so an unresolvable name stops
+the run and lists what the master does have.
 
 **`create_view()`'s own `query` argument is never used.** It applies the query to
 the first layer of the view only, so a view spanning eighteen layers would be

@@ -107,21 +107,27 @@ class TestReadTemplateView:
 class TestSourceLayers:
     def test_returns_the_master_layers_the_view_exposes(self):
         """The seven views span 2 to 18 of the master's layers."""
-        flc = master((0, "a"), (3, "b"), (11, "c"))
-        plan = read_template_view(FakeService([FakeLayer(11, "c"), FakeLayer(0, "a")]))
+        flc = master((0, "a"), (1, "b"), (2, "c"))
+        plan = read_template_view(FakeService([FakeLayer(11, "c"), FakeLayer(19, "a")]))
         layers, tables = source_layers(flc, plan)
-        assert [lyr.properties["id"] for lyr in layers] == [11, 0]
+        assert [lyr.properties["name"] for lyr in layers] == ["c", "a"]
         assert tables == []
 
-    def test_matches_by_layer_id_not_by_position(self):
-        """Master layer ids run past the layer count, so position is not the key."""
-        flc = master((11, "a"), (12, "b"), (19, "c"))
-        plan = read_template_view(FakeService([FakeLayer(19, "c")]))
+    def test_matches_by_name_because_ids_do_not_survive_the_copy(self):
+        """The first live run of stage 2 failed on exactly this.
+
+        `copy_feature_layer_collection()` renumbers the master's layers, so a
+        template view's layer id names a different layer on the copy -- id 11 was
+        `Redline_Details` on the template and `Pole_Design` on the new master.
+        Names survive the copy; stage 1's index pairing checks that on all 18.
+        """
+        flc = master((0, "Redline_Details"), (11, "Pole_Design"))
+        plan = read_template_view(FakeService([FakeLayer(11, "Redline_Details")]))
         layers, _ = source_layers(flc, plan)
-        assert layers[0].properties["name"] == "c"
+        assert layers[0].properties["id"] == 0
 
     def test_returns_tables_separately(self):
-        flc = master((0, "a"), tables=[(19, "Notes")])
+        flc = master((0, "a"), tables=[(1, "Notes")])
         plan = read_template_view(FakeService([FakeLayer(0, "a")], [FakeLayer(19, "Notes")]))
         layers, tables = source_layers(flc, plan)
         assert [t.properties["name"] for t in tables] == ["Notes"]
@@ -131,14 +137,21 @@ class TestSourceLayers:
         """A view silently missing a layer is worse than a stopped run."""
         flc = master((0, "a"))
         plan = read_template_view(FakeService([FakeLayer(7, "missing")]))
-        with pytest.raises(ViewError, match="7"):
+        with pytest.raises(ViewError, match="missing"):
             source_layers(flc, plan)
 
-    def test_refuses_when_the_id_matches_but_the_name_does_not(self):
-        """Checked, not assumed -- the wrong layer in a view exposes wrong data."""
-        flc = master((3, "Redline"))
-        plan = read_template_view(FakeService([FakeLayer(3, "Something_Else")]))
-        with pytest.raises(ViewError, match="Something_Else"):
+    def test_names_the_layers_the_master_does_have(self):
+        """A rename in a template view is the likely cause; say what is there."""
+        flc = master((0, "Redline_Details"), (1, "Pole_Design"))
+        plan = read_template_view(FakeService([FakeLayer(0, "Renamed_In_View")]))
+        with pytest.raises(ViewError, match="Pole_Design"):
+            source_layers(flc, plan)
+
+    def test_refuses_when_the_master_has_two_layers_of_the_same_name(self):
+        """Name is the key, so an ambiguous one must stop rather than pick."""
+        flc = master((0, "Redline"), (1, "Redline"))
+        plan = read_template_view(FakeService([FakeLayer(0, "Redline")]))
+        with pytest.raises(ViewError, match="twice"):
             source_layers(flc, plan)
 
 
@@ -175,10 +188,10 @@ class TestApplyDefinitionQueries:
         apply_definition_queries(new_view, plan)
         assert new_view.layers[0].manager.calls == []
 
-    def test_matches_the_new_view_layers_by_id(self):
-        """preserve_layer_ids keeps them, so ids are the correspondence."""
+    def test_matches_the_new_view_layers_by_name(self):
+        """The new view's ids come from the new master's, not the template's."""
         plan = read_template_view(FakeService([FakeLayer(11, "a", "x = 1")]))
-        new_view = FakeService([FakeLayer(3, "other"), FakeLayer(11, "a")])
+        new_view = FakeService([FakeLayer(0, "other"), FakeLayer(1, "a")])
         apply_definition_queries(new_view, plan)
         assert new_view.layers[0].manager.calls == []
         assert new_view.layers[1].manager.calls == [{"viewDefinitionQuery": "x = 1"}]
@@ -192,7 +205,7 @@ class TestApplyDefinitionQueries:
     def test_reports_a_layer_the_new_view_does_not_have(self):
         """Every filtered layer must end up filtered, or the run has to say so."""
         plan = read_template_view(FakeService([FakeLayer(11, "a", "x = 1")]))
-        outcomes = apply_definition_queries(FakeService([FakeLayer(0, "b")]), plan)
+        outcomes = apply_definition_queries(FakeService([FakeLayer(0, "zzz")]), plan)
         assert [(o.layer, o.status) for o in outcomes] == [("a", "missing")]
 
     def test_reports_a_failure_without_raising(self):
@@ -335,12 +348,12 @@ class TestProvisionStage2:
         """The seven real views span 2 to 18 of the master's layers."""
         self.invoke(monkeypatch, manifest_file, state_dir, registry)
         picked = {
-            name: [lyr.properties["id"] for lyr in call["view_layers"]]
+            name: [lyr.properties["name"] for lyr in call["view_layers"]]
             for name, call in self.calls(registry).items()
         }
         assert picked == {
-            "CompanyA_Moline_Read_Only": [11, 12],
-            "CompanyA_Moline_QC": [11, 19],
+            "CompanyA_Moline_Read_Only": ["Redline", "Bores"],
+            "CompanyA_Moline_QC": ["Redline", "Splice"],
         }
 
     def test_preserves_layer_ids(
@@ -430,4 +443,21 @@ class TestProvisionStage2:
                     layer_ids=[11])
         result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
         assert result.exit_code == 1
-        assert "99" in result.output
+        assert "Gone" in result.output
+
+    def test_the_master_renumbering_its_layers_does_not_break_the_views(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """The regression: the copy renumbers layers, the template view does not.
+
+        Guards the guard -- if the fake ever stopped renumbering, matching by id
+        would pass again and this whole class would stop testing the real case.
+        """
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 0, result.output
+
+        template_ids = sorted(lyr.properties["id"] for lyr in templates.layers)
+        master_ids = sorted(
+            lyr.properties["id"] for lyr in self.new_master(registry).layers
+        )
+        assert template_ids == [11, 12, 19] and master_ids == [0, 1, 2]

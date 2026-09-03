@@ -98,38 +98,48 @@ def _layer_view(layer: Any) -> LayerView:
     )
 
 
+def _by_name(service: Any) -> dict[str, Any]:
+    """Layers and tables of a service, keyed by name.
+
+    Name is the correspondence between a template view and the new master, not
+    layer id. `copy_feature_layer_collection()` renumbers the copy's layers, so a
+    template view's layer id names a *different* layer on the new master -- id 11
+    was `Redline_Details` on the template and `Pole_Design` on the copy. Names
+    survive the copy; stage 1 checks that on every layer before touching indexes.
+    """
+    found: dict[str, Any] = {}
+    for layer in [*service.layers, *service.tables]:
+        name = str(layer.properties.get("name", ""))
+        if name in found:
+            raise ViewError(
+                f"Layer name {name!r} appears twice in the service. Names are how a "
+                f"view's layers are matched to the master's, so this is ambiguous. "
+                f"Rename one of them before provisioning."
+            )
+        found[name] = layer
+    return found
+
+
 def source_layers(new_master: Any, plan: ViewPlan) -> tuple[list[Any], list[Any]]:
     """The new master's layer objects this view is built from, in the view's order.
 
-    `create_view()` takes layer *objects*, and reads each one's id off its
-    manager. Matching is by layer id, not position: the master's 17 layers carry
-    ids running to 19, and the seven views each expose a different subset.
-
-    The name is checked against the id rather than trusted. A view built over the
-    wrong layer exposes the wrong data to whoever the view is shared with, which
-    is worse than a stopped run.
+    `create_view()` takes layer *objects* and reads each one's id off its manager,
+    so the ids the new views carry come from the new master and stay
+    self-consistent. What has to be resolved here is *which* of the master's
+    layers each of the template view's layers means -- and that is by name.
     """
-    by_id = {
-        lyr.properties.get("id"): lyr
-        for lyr in [*new_master.layers, *new_master.tables]
-    }
+    available = _by_name(new_master)
 
     def resolve(wanted: list[LayerView]) -> list[Any]:
         found = []
         for lv in wanted:
-            layer = by_id.get(lv.layer_id)
+            layer = available.get(lv.name)
             if layer is None:
                 raise ViewError(
-                    f"The new master has no layer with id {lv.layer_id} "
-                    f"({lv.name!r}), which this view exposes. The master is "
-                    f"incomplete -- inspect it before creating views from it."
-                )
-            actual = str(layer.properties.get("name", ""))
-            if actual != lv.name:
-                raise ViewError(
-                    f"Layer id {lv.layer_id} is {actual!r} on the new master but "
-                    f"{lv.name!r} on the template view. Refusing to build a view "
-                    f"over a layer that may not be the intended one."
+                    f"The new master has no layer named {lv.name!r}, which this view "
+                    f"exposes. Either the master is incomplete, or the template view "
+                    f"renames that layer -- views can. The master has: "
+                    f"{', '.join(sorted(available))}."
                 )
             found.append(layer)
         return found
@@ -142,18 +152,18 @@ def apply_definition_queries(new_view: Any, plan: ViewPlan) -> list[QueryOutcome
 
     Done for every view rather than only the ones whose queries differ per layer,
     because the service-level shortcut reaches only the first layer. A layer the
-    template leaves unfiltered is left alone.
+    template leaves unfiltered is left alone. Matched by name, for the same reason
+    `source_layers` is: the new view's layer ids come from the new master's, which
+    are not the template's.
     """
-    by_id = {
-        lyr.properties.get("id"): lyr for lyr in [*new_view.layers, *new_view.tables]
-    }
+    available = _by_name(new_view)
     outcomes: list[QueryOutcome] = []
 
     for lv in plan.filtered:
-        layer = by_id.get(lv.layer_id)
+        layer = available.get(lv.name)
         if layer is None:
             outcomes.append(QueryOutcome(lv.name, MISSING,
-                                         f"no layer with id {lv.layer_id} in the new view"))
+                                         "no layer of that name in the new view"))
             continue
         try:
             layer.manager.update_definition({"viewDefinitionQuery": lv.query})

@@ -29,7 +29,7 @@ def idx(name, fields):
     return {"name": name, "fields": fields, "isUnique": False, "isAscending": True}
 
 
-def layer_props(name="redline", indexes=(), extra_fields=()):
+def layer_props(name="redline", indexes=(), extra_fields=(), layer_id=0):
     """A layer definition carrying the system fields every hosted layer has."""
     fields = [
         {"name": "OBJECTID", "type": "esriFieldTypeOID"},
@@ -42,6 +42,7 @@ def layer_props(name="redline", indexes=(), extra_fields=()):
         *({"name": f, "type": "esriFieldTypeString"} for f in extra_fields),
     ]
     return {
+        "id": layer_id,
         "name": name,
         "objectIdField": "OBJECTID",
         "globalIdField": "GlobalID",
@@ -64,6 +65,12 @@ class FakeManager:
         self.calls = []
         self._raises = raises
         self._rejects = set(rejects)
+
+    def update_definition(self, json_dict):
+        self.calls.append(json_dict)
+        if self._raises:
+            raise self._raises
+        return {"success": True}
 
     def add_to_definition(self, json_dict):
         self.calls.append(json_dict)
@@ -409,16 +416,25 @@ class FakeService:
     """A Feature Service item: enough of it for stage 1 and for --destroy."""
 
     def __init__(self, itemid, title, layer_names=("redline",), registry=None,
-                 typeKeywords=("Hosted Service",), indexes=None, copy_returns=True):
+                 typeKeywords=("Hosted Service",), indexes=None, copy_returns=True,
+                 capabilities="Query", queries=None, layer_ids=None):
         self.itemid = itemid
         self.title = title
         self.type = "Feature Service"
         self.typeKeywords = list(typeKeywords)
-        self.layers = [
-            FakeLayer(layer_props(n, indexes or [], extra_fields=["build_status"]))
-            for n in layer_names
-        ]
+        # Layer ids deliberately do not start at 0 and are not contiguous: the
+        # real master's 17 layers carry ids running to 19.
+        ids = layer_ids or [11 + i for i in range(len(layer_names))]
+        self.layers = []
+        for layer_id, n in zip(ids, layer_names):
+            props = layer_props(n, indexes or [], extra_fields=["build_status"],
+                                layer_id=layer_id)
+            if queries and n in queries:
+                props["viewDefinitionQuery"] = queries[n]
+            self.layers.append(FakeLayer(props))
         self.tables = []
+        self.properties = {"capabilities": capabilities}
+        self.manager = FakeServiceManager(self)
         self.updates = []
         self.deleted = False
         self.copy_calls = []
@@ -426,14 +442,21 @@ class FakeService:
         self._copy_returns = copy_returns
         self._registry[itemid] = self
 
+    @property
+    def _next_id(self):
+        return f"{len(self._registry):032x}"
+
     def copy_feature_layer_collection(self, service_name, layers=None, tables=None):
         self.copy_calls.append({"service_name": service_name, "layers": layers, "tables": tables})
         if not self._copy_returns:
             return None
         # The copy is named after the *service*, and arrives with no indexes.
+        # Layer ids are preserved: a schema copy keeps them, and the views stage
+        # matches the master's layers by id.
         return FakeService(
             itemid="c" * 32, title=service_name,
             layer_names=[layer.properties["name"] for layer in self.layers],
+            layer_ids=[layer.properties["id"] for layer in self.layers],
             registry=self._registry,
         )
 
@@ -446,6 +469,25 @@ class FakeService:
     def delete(self):
         self.deleted = True
         return True
+
+
+class FakeServiceManager:
+    """The FeatureLayerCollection manager: create_view lives here."""
+
+    def __init__(self, service):
+        self.service = service
+        self.create_view_calls = []
+
+    def create_view(self, **kwargs):
+        self.create_view_calls.append(kwargs)
+        names = [lyr.properties["name"] for lyr in kwargs.get("view_layers") or []]
+        ids = [lyr.properties["id"] for lyr in kwargs.get("view_layers") or []]
+        view = FakeService(
+            self.service._next_id, kwargs["name"], layer_names=names,
+            registry=self.service._registry, layer_ids=ids,
+            typeKeywords=["View Service"],
+        )
+        return view
 
 
 class FakeContent:
@@ -477,6 +519,13 @@ class TestProvisionStage1:
     @_pytest.fixture(autouse=True)
     def wide_terminal(self, monkeypatch):
         monkeypatch.setenv("COLUMNS", "200")
+
+    @_pytest.fixture(autouse=True)
+    def fakes_are_their_own_service(self, monkeypatch):
+        """A provision run continues into stage 2, whose one arcgis call is this."""
+        from agol_provision import views
+
+        monkeypatch.setattr(views, "service_of", lambda item: item)
 
     @_pytest.fixture
     def registry(self):
@@ -570,7 +619,7 @@ class TestProvisionStage1:
     ):
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         recorded = self.state(state_dir)
-        assert recorded["stages_completed"] == ["preflight", "master"]
+        assert recorded["stages_completed"] == ["preflight", "master", "views"]
         assert recorded["items"]["master"]["item_id"] == "c" * 32
         assert recorded["items"]["master"]["service_name"] == "CompanyA_Moline"
 

@@ -15,12 +15,13 @@ for the phased plan and the reasoning behind the architecture.
 Phase 0 (discovery + master-copy spike) and the core modules are built.
 `docs/implementation-plan.md` holds the phased plan and the reasoning.
 
-**Phase 2 is being built in stage order. Stages 0 (preflight) and 1 (master)
-are done** — `preflight.py` resolves the templates, renders every name, and
+**Phase 2 stages 0-2 are done** — `preflight.py` resolves the templates, renders every name, and
 hard-fails on a taken service name; `master.py` copies the template master and
 reapplies the user-defined indexes the copy drops, classified by *fields* rather
 than by name. `provision --destroy` rolls a project back from run state.
-**Stage 2 (views) is next.** Stages 3-6
+`views.py` creates each view natively from the new master, replaying the
+template's capabilities, layer subset and per-layer definition queries read live
+at provision time. **Stages 0-2 are complete.** Stages 3-6
 (groups, maps, apps, sharing) are deferred at the user's request: creating four
 groups by hand takes a minute, creating seven views takes a day, so the views
 stage carries nearly all the value and none of the clone/remap risk. The plan
@@ -122,6 +123,14 @@ rather than an error:
 - **Never clone hosted feature layer views.** Cloning a view within one org can
   produce an empty service or silently re-point at the source. Create views
   natively with `create_view()` and replay the template view's configuration.
+- **`create_view(query=...)` filters the FIRST LAYER ONLY.** Its
+  `set_visible_fields_and_query()` helper resolves `flc.layers[0]` and updates
+  that one layer, so on a view spanning 18 layers the other 17 are created
+  *unfiltered* -- and these views are shared to subcontractors, so that leaks
+  data rather than merely showing the wrong rows. It also rewrites layer 0's
+  field visibility as a side effect. `views.py` never passes `query=`; it applies
+  `viewDefinitionQuery` per layer for every view, uniform or not. The uniform vs
+  per-layer distinction in the spec therefore affects only what is reported.
 - **Use `remap_data()`, not `item_mapping`.** `item_mapping` does not work with
   dashboards. `remap_data()` (arcgis ≥ 2.4, enforced in `auth.py`) rewrites ids
   throughout an item's JSON.
@@ -141,6 +150,11 @@ rather than an error:
   indexes for that layer. In the first live run this took all 10 real indexes
   down with the 17 spatial ones -- `0 applied, 27 failed`. `reapply_user_indexes`
   retries each index alone when a batch fails.
+- **AGOL returns transient 400s during rapid successive definition changes.**
+  One `add_to_definition` in a run of 18 failed with `Invalid URL` and succeeded
+  unchanged on the next run. Re-running `provision` repairs in place, so this
+  needs no retry logic -- but a single unexplained index failure is worth
+  re-running before investigating.
 - **`copy_feature_layer_collection()` copies nothing by default.** It selects a
   *subset*, so called with both `layers` and `tables` left as `None` it raises
   rather than copying everything. The values it selects with are **positional

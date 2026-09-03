@@ -60,21 +60,27 @@ def layer_props(name="redline", indexes=(), extra_fields=()):
 
 
 class FakeManager:
-    def __init__(self, raises=None):
+    def __init__(self, raises=None, rejects=()):
         self.calls = []
         self._raises = raises
+        self._rejects = set(rejects)
 
     def add_to_definition(self, json_dict):
         self.calls.append(json_dict)
         if self._raises:
             raise self._raises
+        names = {i["name"] for i in json_dict.get("indexes", [])}
+        if names & self._rejects:
+            # AGOL rejects the whole call if any one index in it is invalid.
+            raise RuntimeError("Unable to add feature service layer definition.\n"
+                               "Invalid definition for FieldIndex\n(Error Code: 400)")
         return {"success": True}
 
 
 class FakeLayer:
-    def __init__(self, props, raises=None):
+    def __init__(self, props, raises=None, rejects=()):
         self.properties = props
-        self.manager = FakeManager(raises)
+        self.manager = FakeManager(raises, rejects)
 
 
 class FakeFLC:
@@ -124,15 +130,15 @@ class TestIsUserDefined:
     """The spec's own classification table, case by case."""
 
     @pytest.fixture
-    def system(self):
-        return system_field_names(layer_props(extra_fields=["build_status", "bore_depth"]))
+    def props(self):
+        return layer_props(extra_fields=["build_status", "bore_depth"])
 
     @pytest.mark.parametrize("name,fields", [
         ("build_status_Index", "build_status"),
         ("I25bore_depth", "bore_depth"),
     ])
-    def test_keeps_the_ten_real_ones(self, name, fields, system):
-        assert is_user_defined(idx(name, fields), system)
+    def test_keeps_the_ten_real_ones(self, name, fields, props):
+        assert is_user_defined(idx(name, fields), props)
 
     @pytest.mark.parametrize("name,fields", [
         ("PK__ZAYO_CHI__F4B70D85A1B2C3D4", "OBJECTID"),
@@ -144,8 +150,8 @@ class TestIsUserDefined:
         ("I15Editor", "Editor"),
         ("I16EditDate", "EditDate"),
     ])
-    def test_drops_the_system_generated_ones(self, name, fields, system):
-        assert not is_user_defined(idx(name, fields), system)
+    def test_drops_the_system_generated_ones(self, name, fields, props):
+        assert not is_user_defined(idx(name, fields), props)
 
     def test_classifies_by_fields_not_by_name(self):
         """The decisive case: a user-looking name over a system field is still system.
@@ -154,13 +160,36 @@ class TestIsUserDefined:
         `I##` prefix appears on user indexes too, so the name cannot be trusted
         either way.
         """
-        system = system_field_names(layer_props())
-        assert not is_user_defined(idx("build_status_Index", "OBJECTID"), system)
+        assert not is_user_defined(idx("build_status_Index", "OBJECTID"), layer_props())
 
     def test_keeps_a_composite_index_that_includes_a_system_field(self):
         """Only an index that is *exactly* one system field is system-generated."""
-        system = system_field_names(layer_props(extra_fields=["build_status"]))
-        assert is_user_defined(idx("compound", "build_status,OBJECTID"), system)
+        props = layer_props(extra_fields=["build_status"])
+        assert is_user_defined(idx("compound", "build_status,OBJECTID"), props)
+
+    def test_drops_a_spatial_index_when_the_layer_omits_its_geometry_field(self):
+        """The bug that failed the first live run.
+
+        AGOL does not list the geometry field in a layer's `fields`, so looking
+        for `esriFieldTypeGeometry` finds nothing and `..._Shape_sidx` reads as a
+        user index. Reapplying it is rejected, and -- batched -- it took all ten
+        real indexes down with it.
+        """
+        props = layer_props(extra_fields=["build_status"])
+        props["fields"] = [f for f in props["fields"] if f["name"] != "Shape"]
+        assert not is_user_defined(idx("user_57996.ZAYO_X_Shape_sidx", "Shape"), props)
+
+    def test_still_keeps_a_real_index_on_a_layer_with_no_geometry_field(self):
+        props = layer_props(extra_fields=["build_status"])
+        props["fields"] = [f for f in props["fields"] if f["name"] != "Shape"]
+        assert is_user_defined(idx("build_status_Index", "build_status"), props)
+
+    def test_falls_back_to_the_system_rule_when_a_layer_lists_no_fields(self):
+        """A layer definition without `fields` must not silently drop everything."""
+        props = layer_props()
+        props["fields"] = []
+        assert is_user_defined(idx("build_status_Index", "build_status"), props)
+        assert not is_user_defined(idx("PK__X__99", "OBJECTID"), props)
 
 
 class TestUserDefinedIndexes:
@@ -179,14 +208,74 @@ class TestUserDefinedIndexes:
         assert user_defined_indexes(layer_props()) == []
 
 
+class TestTheLiveMaster:
+    """The shape of the real template, as the first live run revealed it.
+
+    17 layers and 1 table. Every layer carries a spatial index over `Shape`, a
+    primary key over OBJECTID, a GlobalID index and four editor-tracking indexes
+    -- and none of them lists `Shape` in `fields`. Nine redline layers carry
+    `build_status_Index`; `Redline_Details` also carries `I25bore_depth`.
+
+    Exactly ten indexes should survive classification. The first live run kept 31
+    and applied none.
+    """
+
+    REDLINE = ["Redline_Details", "Splice_Point_Redline", "Slack_Loop_Redline",
+               "Pole_Redline", "Equipment_Redline", "Building_Redline",
+               "Access_Point_Redline", "Span_Redline", "Fiber_Cable_Redline"]
+    DESIGN = ["Splice_Closures_Design", "Slack_Loop_Design", "Pole_Design",
+              "Equipment_Design", "Building_Design", "Access_Point_Design",
+              "Fiber_Cable_Design", "Span_Design"]
+
+    def layer(self, name):
+        extra = ["build_status", "bore_depth"] if name in self.REDLINE else ["notes"]
+        props = layer_props(name, extra_fields=extra)
+        # AGOL does not list the geometry field. This is the whole bug.
+        props["fields"] = [f for f in props["fields"] if f["name"] != "Shape"]
+        props["indexes"] = [
+            idx(f"user_57996.ZAYO_CHICAGO_{name.upper()}_Shape_sidx", "Shape"),
+            idx("PK__ZAYO_CHI__F4B70D85A1B2C3D4", "OBJECTID"),
+            idx("FDO_GlobalID", "GlobalID"),
+            idx("I13Creator", "Creator"),
+            idx("I14CreationDate", "CreationDate"),
+            idx("I15Editor", "Editor"),
+            idx("I16EditDate", "EditDate"),
+        ]
+        if name in self.REDLINE:
+            props["indexes"].append(idx("build_status_Index", "build_status"))
+        if name == "Redline_Details":
+            props["indexes"].append(idx("I25bore_depth", "bore_depth"))
+        return props
+
+    def test_exactly_ten_indexes_survive_across_the_whole_service(self):
+        kept = [
+            i["name"]
+            for name in self.REDLINE + self.DESIGN
+            for i in user_defined_indexes(self.layer(name))
+        ]
+        assert len(kept) == 10
+        assert kept.count("build_status_Index") == 9
+        assert kept.count("I25bore_depth") == 1
+
+    def test_no_spatial_index_is_ever_attempted(self):
+        """Reapplying one is rejected, and batched it took the ten real ones down."""
+        kept = [
+            i["name"]
+            for name in self.REDLINE + self.DESIGN
+            for i in user_defined_indexes(self.layer(name))
+        ]
+        assert not [n for n in kept if n.endswith("_sidx")]
+
+
 # ---------------------------------------------------------------- reapplication
 
 
-def template_and_copy(indexes, copy_indexes=(), name="redline", raises=None):
+def template_and_copy(indexes, copy_indexes=(), name="redline", raises=None, rejects=()):
     """A template layer carrying `indexes`, and the freshly copied layer."""
-    template = FakeLayer(layer_props(name, indexes, extra_fields=["build_status"]))
+    template = FakeLayer(layer_props(name, indexes, extra_fields=["build_status", "bore_depth"]))
     copy = FakeLayer(
-        layer_props(name, copy_indexes, extra_fields=["build_status"]), raises=raises
+        layer_props(name, copy_indexes, extra_fields=["build_status", "bore_depth"]),
+        raises=raises, rejects=rejects,
     )
     return FakeFLC([template]), FakeFLC([copy]), copy
 
@@ -242,6 +331,36 @@ class TestReapplyUserIndexes:
         outcomes = reapply_user_indexes(tpl, new)
         assert [o.status for o in outcomes] == ["failed"]
         assert "Invalid definition" in outcomes[0].detail
+
+    def test_one_rejected_index_does_not_take_the_others_down(self):
+        """The second fault in the first live run.
+
+        AGOL rejects the entire add_to_definition call if any index in it is
+        invalid, so batching per layer meant one bad index lost every good one on
+        that layer. On a batch failure each index is retried alone.
+        """
+        tpl, new, copy = template_and_copy(
+            [idx("bad_index", "build_status"), idx("I25bore_depth", "bore_depth")],
+            rejects={"bad_index"},
+        )
+        outcomes = reapply_user_indexes(tpl, new)
+        by_index = {o.index: o.status for o in outcomes}
+        assert by_index == {"bad_index": "failed", "I25bore_depth": "applied"}
+
+    def test_a_single_index_is_not_retried_after_it_fails(self):
+        """Nothing to salvage, and a second rejected call is a wasted request."""
+        tpl, new, copy = template_and_copy(
+            [idx("bad_index", "build_status")], rejects={"bad_index"}
+        )
+        reapply_user_indexes(tpl, new)
+        assert len(copy.manager.calls) == 1
+
+    def test_the_error_detail_is_collapsed_to_one_line(self):
+        """AGOL returns four lines per rejection; 27 of those buried the summary."""
+        tpl, new, copy = template_and_copy(
+            [idx("bad_index", "build_status")], rejects={"bad_index"}
+        )
+        assert "\n" not in reapply_user_indexes(tpl, new)[0].detail
 
     def test_covers_tables_as_well_as_layers(self):
         tpl_layer = FakeLayer(layer_props("redline", [], extra_fields=["build_status"]))
@@ -476,6 +595,50 @@ class TestProvisionStage1:
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         assert len(template.copy_calls) == 1
+
+    def test_a_resume_reattempts_the_indexes_on_the_existing_master(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """The repair path.
+
+        A run whose indexes failed must be fixable by re-running, without
+        creating a second service -- the first one's name is already burned.
+        """
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        copy = registry["c" * 32]
+        before = sum(len(layer.manager.calls) for layer in copy.layers)
+
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        after = sum(len(layer.manager.calls) for layer in copy.layers)
+        assert after > before
+
+    def test_a_resume_whose_master_has_vanished_fails_clearly(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """Deleted by hand in AGOL, still recorded here -- say so, do not crash."""
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        del registry["c" * 32]
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 1
+        assert "c" * 32 in result.output
+
+    def test_repeated_failures_report_the_error_once(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """27 copies of the same four-line AGOL error buried the summary."""
+        from agol_provision import master as master_mod
+
+        monkeypatch.setattr(
+            master_mod, "reapply_user_indexes",
+            lambda t, n: [
+                master_mod.IndexOutcome(f"layer_{i}", "build_status_Index",
+                                        master_mod.FAILED, "Invalid definition (400)")
+                for i in range(9)
+            ],
+        )
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.output.count("Invalid definition (400)") == 1
+        assert "layer_8" in result.output
 
     def test_a_copy_returning_none_fails_loudly(
         self, monkeypatch, manifest_file, state_dir, registry

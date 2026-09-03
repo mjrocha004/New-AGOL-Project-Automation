@@ -89,26 +89,56 @@ def index_fields(index: Any) -> list[str]:
     return [str(p).strip().lower() for p in parts if str(p).strip()]
 
 
-def is_user_defined(index: Any, system_fields: set[str]) -> bool:
+def indexable_field_names(layer_properties: Any) -> set[str]:
+    """Lowercased names of the fields a layer actually exposes.
+
+    AGOL does *not* list the geometry field in a layer's `fields`, which is how a
+    spatial index is recognised even though `esriFieldTypeGeometry` never appears
+    there: `..._Shape_sidx` names a field the layer does not expose.
+    """
+    return {
+        str(field.get("name", "")).lower()
+        for field in (layer_properties.get("fields", []) or [])
+        if field.get("name")
+    }
+
+
+def is_user_defined(index: Any, layer_properties: Any) -> bool:
     """Whether an index is worth reapplying to a copy.
 
-    An index is system-generated when its fields are *exactly* one system field.
-    A composite index is always kept even if it includes a system field: nothing
-    AGOL generates on its own spans two columns.
+    Two ways to be system-generated, both decided by *fields* rather than names:
+
+    1. The fields are exactly one system field -- the object id, the global id,
+       the geometry field, or an editor-tracking field. A composite index is kept
+       even when it includes a system field, since nothing AGOL generates on its
+       own spans two columns.
+    2. Any field is one the layer does not expose. AGOL omits the geometry field
+       from `fields`, so this is what catches a spatial index; and an index over a
+       field that is not there cannot be reapplied in any case -- AGOL rejects it.
+
+    Rule 2 is skipped for a layer that lists no fields at all, so an unreadable
+    definition drops nothing rather than everything.
     """
     fields = index_fields(index)
-    if len(fields) == 1 and fields[0] in system_fields:
+    if not fields:
         return False
-    return bool(fields)
+
+    if len(fields) == 1 and fields[0] in system_field_names(layer_properties):
+        return False
+
+    exposed = indexable_field_names(layer_properties)
+    if exposed and not all(field in exposed for field in fields):
+        return False
+
+    return True
 
 
 def user_defined_indexes(layer_properties: Any) -> list[dict]:
     """The indexes on one layer that a copy would lose and should get back."""
-    system = system_field_names(layer_properties)
     return [
         dict(index)
         for index in (layer_properties.get("indexes", []) or [])
-        if is_user_defined(index, system)
+        if is_user_defined(index, layer_properties)
     ]
 
 
@@ -147,11 +177,35 @@ def reapply_user_indexes(template_flc: Any, new_flc: Any) -> list[IndexOutcome]:
         try:
             new_layer.manager.add_to_definition({"indexes": to_apply})
         except Exception as exc:
-            status, detail = _classify_failure(exc)
-            outcomes += [IndexOutcome(name, i["name"], status, detail) for i in to_apply]
+            outcomes += _retry_individually(new_layer, name, to_apply, exc)
         else:
             outcomes += [IndexOutcome(name, i["name"], APPLIED) for i in to_apply]
 
+    return outcomes
+
+
+def _retry_individually(
+    layer: Any, layer_name: str, batch: list[dict], batch_error: Exception
+) -> list[IndexOutcome]:
+    """Salvage the good indexes from a batch AGOL rejected as a whole.
+
+    AGOL fails the entire `add_to_definition` call if any single index in it is
+    invalid, so one bad index would otherwise lose every good one on the layer.
+    A batch of one has nothing to salvage and is not retried.
+    """
+    if len(batch) == 1:
+        status, detail = _classify_failure(batch_error)
+        return [IndexOutcome(layer_name, batch[0]["name"], status, detail)]
+
+    outcomes = []
+    for index in batch:
+        try:
+            layer.manager.add_to_definition({"indexes": [index]})
+        except Exception as exc:
+            status, detail = _classify_failure(exc)
+            outcomes.append(IndexOutcome(layer_name, index["name"], status, detail))
+        else:
+            outcomes.append(IndexOutcome(layer_name, index["name"], APPLIED))
     return outcomes
 
 
@@ -183,7 +237,8 @@ def _paired_layers(template_flc: Any, new_flc: Any) -> list[tuple[Any, Any]]:
 
 def _classify_failure(exc: Exception) -> tuple[str, str]:
     """A duplicate is the outcome this stage wanted anyway; anything else is a failure."""
-    detail = str(exc)
+    # AGOL returns four lines per rejection; 27 of those buried the summary.
+    detail = " ".join(str(exc).split())
     if any(marker in detail.lower() for marker in _DUPLICATE_MARKERS):
         return ALREADY_PRESENT, detail
     return FAILED, detail

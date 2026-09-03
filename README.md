@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 378 tests pass, none needing network access.
+the master schema copies faithfully. 389 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -343,12 +343,22 @@ never have matched, and 10 are real — `build_status_Index` on 9 layers and
 is the field every view's definition query filters on, so a master without it
 makes all seven views table-scan.
 
-Indexes are classified by their **fields**, never by their names. An index is
-treated as system-generated when its fields are exactly one system field — the
-object id, the global id, the geometry field, or an editor-tracking field. The
-system names carry random suffixes and owner ids, and `I25bore_depth` shows the
-`I##` prefix appears on user indexes too, so a name proves nothing either way. A
-duplicate-index error from AGOL is tolerated rather than fatal.
+Indexes are classified by their **fields**, never by their names. The system
+names carry random suffixes and owner ids, and `I25bore_depth` shows the `I##`
+prefix appears on user indexes too, so a name proves nothing either way. An index
+is treated as system-generated when either:
+
+- its fields are exactly one system field — the object id, the global id, the
+  geometry field, or an editor-tracking field; or
+- any of its fields is one the layer does not expose in `fields`. AGOL omits the
+  geometry field there, so this is what catches a spatial index
+  (`user_<id>.<LAYER>_Shape_sidx`) — and an index over a field that is not there
+  would be rejected anyway.
+
+A duplicate-index error from AGOL is tolerated rather than fatal. Indexes are
+applied one call per layer, but AGOL rejects the whole call if any single index
+in it is invalid, so a failed batch is retried one index at a time — otherwise
+one bad index loses every good one on that layer.
 
 The new master is **schema only, with no features** — nothing copies data.
 
@@ -356,6 +366,12 @@ A failed index is reported but does not lose the master: the item is recorded in
 state before anything else can fail, because an item that exists in AGOL but not
 in state is the one failure mode that leaks an orphan. A missing index is a
 performance problem, not a correctness one.
+
+**Re-running repairs.** A second `provision` for the same project does not create
+a second service — it finds the recorded master and rechecks its indexes,
+applying any that are missing. That matters because the service name is burned
+the moment the first one is created, so a run that lost its indexes has to be
+fixable in place rather than by rolling back and picking a new name.
 
 ### Rolling a project back
 

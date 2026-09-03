@@ -847,20 +847,29 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
 
 def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
     """Stage 1: copy the template master, name it, and put its indexes back."""
-    from agol_provision.master import APPLIED, FAILED, MasterError, reapply_user_indexes
     from agol_provision.state import CreatedItem
 
     spec = manifest.master
     title = ctx.render_title(spec.title)
     service_name = ctx.render_service_name(spec.service_name)
+    template = gis.content.get(spec.template_item_id)
 
     console.print("\n[bold]Stage 1 -- master[/bold]")
     if state.has(spec.key):
+        # Resume doubles as repair. The service name is already burned, so a run
+        # whose indexes failed has to be fixable without creating a second one.
         existing = state.get(spec.key)
-        console.print(f"[dim]Already created as {existing.item_id}; skipping.[/dim]")
+        already = gis.content.get(existing.item_id)
+        if already is None:
+            _fail(f"{existing.title} ({existing.item_id}) is recorded for this project "
+                  f"but is not in the org -- it was deleted by hand. Run "
+                  f"`provision --destroy {state.slug}` to clear the record, then "
+                  f"re-run with a service name that is still free.")
+        console.print(f"[dim]Already created as {existing.item_id}; "
+                      f"rechecking indexes.[/dim]")
+        _reapply_and_report(template, already)
         return
 
-    template = gis.content.get(spec.template_item_id)
     console.print(f"Copying [cyan]{template.title}[/cyan] to [cyan]{service_name}[/cyan] "
                   f"({len(template.layers)} layer(s), {len(template.tables)} table(s))...")
     copy_item = copy_whole_service(template, service_name)
@@ -889,15 +898,25 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
     })
     console.print(f"Item title set to [cyan]{title}[/cyan]")
 
-    # The copy strips every index, so the ten user-defined ones go back by hand.
-    # `build_status_Index` is the one that matters: build_status is the field
-    # every view's definition query filters on.
+    _reapply_and_report(template, copy_item)
+
+
+def _reapply_and_report(template: Any, service: Any) -> None:
+    """Put the template's user-defined indexes back, and say what happened.
+
+    The copy strips every index, so the ten user-defined ones go back by hand.
+    `build_status_Index` is the one that matters: `build_status` is the field
+    every view's definition query filters on.
+    """
+    from collections import defaultdict
+
+    from agol_provision.master import APPLIED, FAILED, MasterError, reapply_user_indexes
+
     try:
-        outcomes = reapply_user_indexes(template, copy_item)
+        outcomes = reapply_user_indexes(template, service)
     except MasterError as exc:
         err.print(f"Indexes were NOT reapplied: {exc}\nThe master exists and is "
-                  f"recorded. Fix the cause and reapply by hand, or --destroy and "
-                  f"re-run.")
+                  f"recorded. Fix the cause and re-run to reapply them.")
         return
 
     if not outcomes:
@@ -911,8 +930,15 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         f"{len(outcomes) - len(applied) - len(failed)} already present, "
         f"{len(failed)} failed"
     )
+
+    # Grouped by message: AGOL repeats the same rejection per index, and one
+    # copy per failure buried the summary line under a hundred lines of it.
+    grouped: dict[str, list[str]] = defaultdict(list)
     for outcome in failed:
-        err.print(f"  index {outcome.index} on {outcome.layer} failed: {outcome.detail}")
+        grouped[outcome.detail].append(f"{outcome.index} on {outcome.layer}")
+    for detail, where in grouped.items():
+        err.print(f"  {len(where)} index(es) failed: {detail}")
+        err.print(f"    [dim]{', '.join(where)}[/dim]")
     if failed:
         err.print("The master exists and is recorded. A missing index is a "
                   "performance problem, not a correctness one -- every view's "

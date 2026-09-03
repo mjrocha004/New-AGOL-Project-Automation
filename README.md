@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 389 tests pass, none needing network access.
+the master schema copies faithfully. 398 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -108,6 +108,7 @@ read-only.
 | `preview` | Show every name a manifest would produce. No connection needed. |
 | `spike-master` | Test whether the master schema copies faithfully. |
 | `provision` | Provision a project: preflight, then the master service. |
+| `inspect-indexes` | Compare a provisioned master's indexes against its template. |
 | `setup-profile` | Store credentials, for a machine without ArcGIS Pro. |
 
 ## Phase 0 — run these, then send back the output
@@ -372,6 +373,24 @@ a second service — it finds the recorded master and rechecks its indexes,
 applying any that are missing. That matters because the service name is burned
 the moment the first one is created, so a run that lost its indexes has to be
 fixable in place rather than by rolling back and picking a new name.
+
+### Checking the indexes landed
+
+```bat
+python -m agol_provision.cli inspect-indexes --slug companya-moline
+```
+
+Read-only. Lists every index the tool classifies as user-defined and whether the
+copy has it, so the spec's verification step — `build_status_Index` on all nine
+redline layers — is a command rather than a click-through in the AGOL UI. Run it
+after provisioning, and first whenever an index fails to reapply.
+
+Classification is by fields, so `--layer NAME` prints the fields the decision was
+made from: which the layer treats as system, which it exposes at all, every index
+on it, and what the copy currently has.
+
+Anything reported `MISSING` is fixed by re-running `provision` for that project —
+it repairs in place rather than creating a second service.
 
 ### Rolling a project back
 

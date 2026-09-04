@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 454 tests pass, none needing network access.
+the master schema copies faithfully. 464 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -432,6 +432,13 @@ it, so the view it hands back can report no layers at all for several seconds.
 Provisioning polls until every expected layer appears — rebuilding the collection
 each time, because a `FeatureLayerCollection` snapshots its layer list once and
 never updates it — and only then applies the queries.
+
+**If the layers never arrive, provisioning posts them itself.** `create_view()`
+throws away the handle to its own asynchronous job, so a job that fails
+server-side leaves a view item with no layers and no error anywhere — which is
+exactly what happened on the first attempt at an 18-layer view. After the wait
+runs out, the same layer definition is posted synchronously, which either creates
+the layers or returns AGOL's reason for refusing.
 
 **A definition query that does not apply stops the run.** A view missing its
 filter is unfiltered, not slightly wrong, and these get shared to subcontractors.

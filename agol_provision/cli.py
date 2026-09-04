@@ -884,6 +884,8 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         apply_definition_queries,
         read_template_view,
         service_of,
+        add_view_layers,
+        build_view_definition,
         source_layers,
         wait_for_layers,
     )
@@ -938,14 +940,26 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         # AGOL adds a view's layers with an async job that create_view() does not
         # wait for, so the service can report nothing at all for several seconds.
         # Each poll builds a fresh collection: `.layers` is snapshotted once.
+        expected = {lv.name for lv in [*plan.layers, *plan.tables]}
         try:
-            ready = wait_for_layers(
-                lambda: service_of(new_item),
-                {lv.name for lv in [*plan.layers, *plan.tables]},
-                sleep=SLEEP,
-            )
+            ready = wait_for_layers(lambda: service_of(new_item), expected, sleep=SLEEP)
         except ViewError as exc:
-            _fail(f"{spec.key}: {exc}")
+            # The async job never landed. It may have failed -- create_view()
+            # discards the Future, so there is no error anywhere to read. Post the
+            # same definition synchronously, which either works or says why.
+            console.print(f"[yellow]{service_name} still has no layers.[/yellow] "
+                          f"[dim]{exc}[/dim]")
+            console.print("[yellow]Posting them synchronously instead...[/yellow]")
+            try:
+                add_view_layers(
+                    service_of(new_item), build_view_definition(master_flc, plan)
+                )
+                ready = wait_for_layers(
+                    lambda: service_of(new_item), expected, sleep=SLEEP
+                )
+            except ViewError as retry:
+                _fail(f"{spec.key}: {retry}\nThe view exists and is recorded, so "
+                      f"`provision --destroy {state.slug}` will remove it.")
 
         outcomes = apply_definition_queries(ready, plan)
         applied = [o for o in outcomes if o.status == APPLIED]

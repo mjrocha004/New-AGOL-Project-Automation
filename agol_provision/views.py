@@ -244,3 +244,82 @@ def service_of(item: Any) -> Any:
     from arcgis.features import FeatureLayerCollection
 
     return FeatureLayerCollection.fromitem(item)
+
+
+# ---------------------------------------------------------------- the sync path
+
+# `create_view()` posts the view's layers with `add_to_definition(..., future=True)`
+# and throws the Future away, so a job that fails server-side is invisible from
+# the client: it hands back an item, and the service stays empty forever. That is
+# not hypothetical -- one 18-layer view came back empty and was still empty hours
+# later, with no error anywhere.
+#
+# These two functions rebuild the same definition and post it synchronously, which
+# is what `copy_feature_layer_collection()` does for the master and why stage 1
+# has never had this class of failure. Either the layers arrive, or AGOL says why.
+
+
+def source_service_name(master_service: Any) -> str:
+    """The master's service name, taken from its own URL.
+
+    Split on "/" rather than with `os.path`, which is what arcgis uses -- the URL
+    is not a filesystem path and this code runs on Windows.
+    """
+    parts = [p for p in str(master_service.url).split("/") if p]
+    if len(parts) < 2:
+        raise ViewError(f"Cannot read a service name from {master_service.url!r}.")
+    return parts[-2]
+
+
+def build_view_definition(master_service: Any, plan: ViewPlan) -> dict:
+    """The `addToDefinition` payload for a view over `plan`'s layers.
+
+    Each entry points at the layer id **on the new master**, not the template's --
+    the copy renumbers, so the template's ids name different layers.
+
+    `popupInfo` is omitted rather than sent as null, which is what `create_view()`
+    does. A null there is one more thing AGOL can object to, and nothing in this
+    project sets popups.
+    """
+    service_name = source_service_name(master_service)
+    available = _by_name(master_service)
+
+    def entry(lv: LayerView, is_table: bool) -> dict:
+        layer = available[lv.name]
+        layer_id = layer.properties.get("id")
+        definition = {
+            "id": layer_id,
+            "name": lv.name,
+            "adminLayerInfo": {
+                "viewLayerDefinition": {
+                    "sourceServiceName": service_name,
+                    "sourceLayerId": layer_id,
+                    "sourceLayerFields": "*",
+                },
+            },
+        }
+        if is_table:
+            definition["type"] = "Table"
+        return definition
+
+    return {
+        "layers": [entry(lv, False) for lv in plan.layers],
+        "tables": [entry(lv, True) for lv in plan.tables],
+    }
+
+
+def add_view_layers(new_view: Any, definition: dict) -> dict:
+    """Post a view's layer definition synchronously, so a failure is visible."""
+    try:
+        result = new_view.manager.add_to_definition(definition, future=False)
+    except Exception as exc:
+        raise ViewError(
+            f"Adding the view's layers failed: {' '.join(str(exc).split())}"
+        ) from exc
+
+    if isinstance(result, dict) and result.get("success") is False:
+        raise ViewError(
+            f"Adding the view's layers was rejected: "
+            f"{result.get('error', result)}"
+        )
+    return result if isinstance(result, dict) else {"success": True}

@@ -238,12 +238,18 @@ decisions in waiting, not defects.
 1. **Stage 2 has never completed a live run.** On 2026-09-04 the `TestCompany /
    Moline` run built the master cleanly (`10 applied, 4 already present, 0
    failed`) and then `zayo_chicago_read_only` reported **zero** layers for the
-   full 168s wait. Unknown whether the AGOL job was merely slow or had failed:
-   `create_view()` discards the Future, so a failed job is indistinguishable from
-   a slow one from the client side. **The next thing to check is whether that
-   view eventually got its layers** — if it did, the wait is too short; if it did
-   not, the job failed and the payload needs inspecting. Until then the timeout
-   is a guess.
+   full 168s wait — and was **still empty hours later**, so the AGOL job failed
+   rather than ran slow. `create_view()` discards the Future for its own POST, so
+   there is no error to read anywhere. Stage 2 now falls back to posting the
+   layer definition itself with `add_to_definition(..., future=False)`, which
+   either works or returns AGOL's reason; **the next run's output is what
+   identifies the cause.**
+
+   One correlation worth carrying into that run: the only run in which stage 1
+   *successfully applied indexes* is the run in which the first view's job
+   failed. Run 1 applied 0 indexes and its views materialised. A master still
+   settling from 18 definition changes is a plausible cause and so is something
+   in the payload; the synchronous error will say which.
 2. **The copied master has no GlobalID index.** The template carries
    `FDO_GlobalID` (unique) on every layer; the copy carries none covering
    `GlobalID` under any name, while AGOL *did* recreate the editor-tracking

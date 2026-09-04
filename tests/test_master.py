@@ -445,6 +445,9 @@ class FakeService:
             layer.contingent_values = contingent
             self.layers.append(layer)
         self.tables = []
+        self.url = (
+            f"https://services.arcgis.com/org/arcgis/rest/services/{title}/FeatureServer"
+        )
         self.properties = {"capabilities": capabilities}
         self.manager = FakeServiceManager(self)
         self.updates = []

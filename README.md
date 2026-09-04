@@ -361,7 +361,8 @@ A second, narrower pass reapplies anything the copy indexes **nowhere under any
 name** — compared by fields, since AGOL renames what it recreates. In practice
 that finds one thing: the GlobalID index. AGOL rebuilds the editor-tracking
 indexes and the primary key for itself but creates nothing over `GlobalID`, and
-several template views carry `Sync`, which keys on it.
+several template views carry `Sync`, which keys on it. AGOL accepts it back:
+verified on all 18 layers of a live run.
 
 A duplicate-index error from AGOL is tolerated rather than fatal. Indexes are
 applied one call per layer, but AGOL rejects the whole call if any single index

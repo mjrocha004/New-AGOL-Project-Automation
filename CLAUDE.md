@@ -164,6 +164,15 @@ rather than an error:
 - **`--profile home` requires ArcGIS Pro's Python**, because it reads the sign-in
   token through `arcpy`. It cannot work from a standalone venv — use a stored
   profile there.
+- **AGOL recreates every system index except the GlobalID one.** A copied master
+  arrives with editor-tracking indexes and a primary key AGOL built itself, under
+  its own names -- but nothing covering `GlobalID` on any layer, where the
+  template has `FDO_GlobalID` on some and `GlobalID_Index` on others. It matters
+  because several template views carry `Sync`, and offline sync keys on GlobalID.
+  `reapply_missing_coverage()` puts it back and **AGOL accepts it**: 18 applied,
+  0 failed, confirmed on all 18 layers of a live run. The gap is only findable
+  because coverage is compared by *fields*; by name, `CreatorIndex` vs
+  `I13Creator` and `PK__TestComp__` vs `PK__ZAYO_CHI__` read as losses too.
 - **A layer's `fields` does not include the geometry field.** So looking for
   `esriFieldTypeGeometry` to identify the shape field finds nothing, and a
   spatial index (`user_<id>.<LAYER>_Shape_sidx`) reads as user-defined. AGOL then
@@ -252,7 +261,7 @@ decisions in waiting, not defects.
    10 indexes and its views materialised immediately. That hypothesis is dead;
    treat the earlier failure as unexplained, most likely transient.
 
-3. **Contingent values are reported, never repaired.** See Known gaps. The report
+2. **Contingent values are reported, never repaired.** See Known gaps. The report
    exists so the loss is named; the writer does not exist at all in arcgis.
 
 ## Not in the manifest, on purpose

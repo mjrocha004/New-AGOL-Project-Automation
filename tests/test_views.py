@@ -21,6 +21,8 @@ from agol_provision.views import (
     ViewError,
     apply_definition_queries,
     read_template_view,
+    add_view_layers,
+    build_view_definition,
     source_layers,
     wait_for_layers,
 )
@@ -231,6 +233,103 @@ class TestWaitForLayers:
             return got
 
         assert wait_for_layers(fetch, {"a"}, sleep=lambda _: None) is ready
+
+
+class TestBuildViewDefinition:
+    """The layer payload `create_view()` posts asynchronously, built ourselves.
+
+    Rebuilt rather than borrowed because `create_view()` discards the Future that
+    tracks its own POST, so a job that fails server-side is invisible: the client
+    sees an item, and the service stays empty forever. Posting the same definition
+    synchronously turns that into either a working view or a readable error.
+    """
+
+    def master_at(self, url, *ids_and_names, tables=()):
+        svc = master(*ids_and_names, tables=tables)
+        svc.url = url
+        return svc
+
+    URL = "https://services.arcgis.com/abc/arcgis/rest/services/TestCompany_Moline/FeatureServer"
+
+    def test_names_the_source_service_from_the_master_url(self):
+        """`sourceServiceName` is the master's service name, not the view's."""
+        flc = self.master_at(self.URL, (0, "Redline"))
+        plan = read_template_view(FakeService([FakeLayer(11, "Redline")]))
+        payload = build_view_definition(flc, plan)
+        source = payload["layers"][0]["adminLayerInfo"]["viewLayerDefinition"]
+        assert source["sourceServiceName"] == "TestCompany_Moline"
+
+    def test_points_each_view_layer_at_the_masters_id_not_the_templates(self):
+        flc = self.master_at(self.URL, (0, "Redline"), (1, "Bores"))
+        plan = read_template_view(FakeService([FakeLayer(19, "Bores")]))
+        entry = build_view_definition(flc, plan)["layers"][0]
+        assert entry["id"] == 1
+        assert entry["adminLayerInfo"]["viewLayerDefinition"]["sourceLayerId"] == 1
+        assert entry["name"] == "Bores"
+
+    def test_takes_every_field_of_the_source_layer(self):
+        """No visible_fields path is built; a view exposes the master's fields."""
+        flc = self.master_at(self.URL, (0, "Redline"))
+        plan = read_template_view(FakeService([FakeLayer(0, "Redline")]))
+        source = build_view_definition(flc, plan)["layers"][0]["adminLayerInfo"]
+        assert source["viewLayerDefinition"]["sourceLayerFields"] == "*"
+
+    def test_marks_tables_as_tables(self):
+        """Both 18-layer views include the master's one table."""
+        flc = self.master_at(self.URL, (0, "Redline"), tables=[(17, "RateCodeApplied")])
+        plan = read_template_view(
+            FakeService([FakeLayer(0, "Redline")], [FakeLayer(20, "RateCodeApplied")])
+        )
+        payload = build_view_definition(flc, plan)
+        assert [t["name"] for t in payload["tables"]] == ["RateCodeApplied"]
+        assert payload["tables"][0]["type"] == "Table"
+        assert [lyr["name"] for lyr in payload["layers"]] == ["Redline"]
+
+    def test_sends_no_null_popupinfo(self):
+        """create_view sends `popupInfo: null`; omitting it is one less thing to reject."""
+        flc = self.master_at(self.URL, (0, "Redline"))
+        plan = read_template_view(FakeService([FakeLayer(0, "Redline")]))
+        assert "popupInfo" not in build_view_definition(flc, plan)["layers"][0]["adminLayerInfo"]
+
+
+class TestAddViewLayers:
+    def test_posts_the_definition_synchronously(self):
+        """Synchronous is the whole point: the error comes back to us."""
+        view = FakeService([])
+        view.manager = FakeServiceManager()
+        add_view_layers(view, {"layers": [{"id": 0}], "tables": []})
+        assert view.manager.added == [{"layers": [{"id": 0}], "tables": []}]
+        assert view.manager.futures == [False]
+
+    def test_surfaces_the_agol_error(self):
+        view = FakeService([])
+        view.manager = FakeServiceManager(raises=RuntimeError("Invalid definition"))
+        with pytest.raises(ViewError, match="Invalid definition"):
+            add_view_layers(view, {"layers": [], "tables": []})
+
+    def test_reports_a_failure_response_that_does_not_raise(self):
+        """AGOL can answer 200 with success=False."""
+        view = FakeService([])
+        view.manager = FakeServiceManager(result={"success": False, "error": "nope"})
+        with pytest.raises(ViewError, match="nope"):
+            add_view_layers(view, {"layers": [], "tables": []})
+
+
+class FakeServiceManager:
+    """The collection manager, for the synchronous add path."""
+
+    def __init__(self, raises=None, result=None):
+        self.added = []
+        self.futures = []
+        self._raises = raises
+        self._result = result if result is not None else {"success": True}
+
+    def add_to_definition(self, json_dict, future=False):
+        self.added.append(json_dict)
+        self.futures.append(future)
+        if self._raises:
+            raise self._raises
+        return self._result
 
 
 # ---------------------------------------------------------------- queries
@@ -553,6 +652,87 @@ class TestProvisionStage2:
         assert [lyr.manager.calls for lyr in view.layers] == [
             [{"viewDefinitionQuery": UNIFORM_Q}], [{"viewDefinitionQuery": UNIFORM_Q}]
         ]
+
+    def test_posts_the_layers_itself_when_the_async_job_never_lands(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """The live dead end: an 18-layer view came back empty and stayed empty.
+
+        create_view() discards the Future for its own POST, so a job that failed
+        server-side leaves an item with no layers and no error anywhere. Posting
+        the same definition synchronously either works or says why.
+        """
+        from agol_provision import views
+
+        class EmptyUntilPosted:
+            """A view service whose layers appear only once posted synchronously."""
+
+            def __init__(self, item):
+                self.properties = item.properties
+                self.url = item.url
+                self._item = item
+                self.posted = None
+                self.manager = self
+
+            def add_to_definition(self, json_dict, future=False):
+                self.posted = json_dict
+                return {"success": True}
+
+            @property
+            def layers(self):
+                return self._item.layers if self.posted else []
+
+            @property
+            def tables(self):
+                return self._item.tables if self.posted else []
+
+        template_ids = {TEMPLATE_MASTER, UNIFORM_VIEW, PER_LAYER_VIEW}
+        wrappers = {}
+
+        def service_of(item):
+            new_view = (item.itemid not in template_ids
+                        and "View Service" in item.typeKeywords)
+            if not new_view:
+                return item
+            return wrappers.setdefault(item.itemid, EmptyUntilPosted(item))
+
+        monkeypatch.setattr(views, "service_of", service_of)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 0, result.output
+
+        posted = [w.posted for w in wrappers.values()]
+        assert all(p is not None for p in posted)
+        assert [lyr["name"] for lyr in posted[0]["layers"]] == ["Redline", "Bores"]
+        assert "posting them" in result.output.lower()
+
+    def test_a_synchronous_post_that_agol_rejects_fails_the_run(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """The point of the fallback is the error message, so it must surface."""
+        from agol_provision import views
+
+        class NeverReady:
+            def __init__(self, item):
+                self.properties = item.properties
+                self.url = item.url
+                self.layers = []
+                self.tables = []
+                self.manager = self
+
+            def add_to_definition(self, json_dict, future=False):
+                raise RuntimeError("Invalid definition for viewLayerDefinition")
+
+        template_ids = {TEMPLATE_MASTER, UNIFORM_VIEW, PER_LAYER_VIEW}
+
+        def service_of(item):
+            new_view = (item.itemid not in template_ids
+                        and "View Service" in item.typeKeywords)
+            return NeverReady(item) if new_view else item
+
+        monkeypatch.setattr(views, "service_of", service_of)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 1
+        assert "Invalid definition for viewLayerDefinition" in result.output
 
     def test_an_unapplied_definition_query_fails_the_run(
         self, monkeypatch, manifest_file, state_dir, registry, templates

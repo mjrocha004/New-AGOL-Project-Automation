@@ -61,10 +61,11 @@ def layer_props(name="redline", indexes=(), extra_fields=(), layer_id=0):
 
 
 class FakeManager:
-    def __init__(self, raises=None, rejects=()):
+    def __init__(self, raises=None, rejects=(), props=None):
         self.calls = []
         self._raises = raises
         self._rejects = set(rejects)
+        self._props = props if props is not None else {}
 
     def update_definition(self, json_dict):
         self.calls.append(json_dict)
@@ -81,13 +82,18 @@ class FakeManager:
             # AGOL rejects the whole call if any one index in it is invalid.
             raise RuntimeError("Unable to add feature service layer definition.\n"
                                "Invalid definition for FieldIndex\n(Error Code: 400)")
+        # An applied index is really there afterwards, so a second run sees it.
+        self._props.setdefault("indexes", []).extend(
+            dict(i) for i in json_dict.get("indexes", [])
+        )
         return {"success": True}
 
 
 class FakeLayer:
     def __init__(self, props, raises=None, rejects=()):
         self.properties = props
-        self.manager = FakeManager(raises, rejects)
+        self.contingent_values = None
+        self.manager = FakeManager(raises, rejects, props)
 
 
 class FakeFLC:
@@ -418,7 +424,7 @@ class FakeService:
     def __init__(self, itemid, title, layer_names=("redline",), registry=None,
                  typeKeywords=("Hosted Service",), indexes=None, copy_returns=True,
                  capabilities="Query", queries=None, layer_ids=None,
-                 snippet="", description="", tags=None):
+                 snippet="", description="", tags=None, contingent=None):
         self.itemid = itemid
         self.title = title
         self.snippet = snippet
@@ -435,8 +441,13 @@ class FakeService:
                                 layer_id=layer_id)
             if queries and n in queries:
                 props["viewDefinitionQuery"] = queries[n]
-            self.layers.append(FakeLayer(props))
+            layer = FakeLayer(props)
+            layer.contingent_values = contingent
+            self.layers.append(layer)
         self.tables = []
+        self.url = (
+            f"https://services.arcgis.com/org/arcgis/rest/services/{title}/FeatureServer"
+        )
         self.properties = {"capabilities": capabilities}
         self.manager = FakeServiceManager(self)
         self.updates = []
@@ -457,12 +468,21 @@ class FakeService:
         # The copy is named after the *service*, arrives with no indexes, and
         # RENUMBERS the layers: ids do not survive copy_feature_layer_collection.
         # Names do, which is why the views stage matches on them.
-        return FakeService(
+        copy = FakeService(
             itemid="c" * 32, title=service_name,
             layer_names=[layer.properties["name"] for layer in self.layers],
             layer_ids=list(range(len(self.layers))),
             registry=self._registry,
         )
+        # AGOL recreates the system indexes under its own names; the user-defined
+        # ones are the ones the copy loses, which is why stage 1 exists.
+        for src, dst in zip(self.layers, copy.layers):
+            user = {i["name"] for i in user_defined_indexes(src.properties)}
+            dst.properties["indexes"] = [
+                dict(i) for i in src.properties.get("indexes", []) or []
+                if i["name"] not in user
+            ]
+        return copy
 
     def update(self, item_properties=None, **kwargs):
         props = item_properties or kwargs
@@ -661,12 +681,9 @@ class TestProvisionStage1:
         creating a second service -- the first one's name is already burned.
         """
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        copy = registry["c" * 32]
-        before = sum(len(layer.manager.calls) for layer in copy.layers)
-
-        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        after = sum(len(layer.manager.calls) for layer in copy.layers)
-        assert after > before
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert "rechecking indexes" in result.output
+        assert "2 already present" in result.output
 
     def test_a_resume_whose_master_has_vanished_fails_clearly(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -695,6 +712,25 @@ class TestProvisionStage1:
         result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         assert result.output.count("Invalid definition (400)") == 1
         assert "layer_8" in result.output
+
+    def test_reports_contingent_values_the_copy_lost(
+        self, monkeypatch, manifest_file, state_dir, registry
+    ):
+        """Not repaired -- arcgis ships no writer -- but named rather than silent."""
+        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
+                    typeKeywords=["View Service"])
+        FakeService(TEMPLATE_MASTER, "Zayo Chicago", layer_names=["redline"],
+                    registry=registry, contingent={"contingentValues": [{"id": 1}]})
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 0, result.output
+        assert "contingent values" in result.output
+        assert "redline" in result.output
+
+    def test_a_clean_copy_reports_no_gaps(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert "Not carried over" not in result.output
 
     def test_a_copy_returning_none_fails_loudly(
         self, monkeypatch, manifest_file, state_dir, registry
@@ -954,3 +990,99 @@ class TestInspectIndexes:
         ])
         assert result.exit_code == 1
         assert "nope" in result.output
+
+
+# ---------------------------------------------------------------- silent losses
+
+
+class TestMissingIndexCoverage:
+    """Compare index coverage by FIELDS, since AGOL renames what it recreates.
+
+    The first live run of stage 1 showed the copy carrying CreationDateIndex,
+    CreatorIndex, EditDateIndex, EditorIndex and a PK -- all created by AGOL
+    itself, under its own names -- but **no GlobalID index at all**, where the
+    template has `FDO_GlobalID`. Comparing names would report all five as lost;
+    comparing fields reports only the one that really is.
+    """
+
+    def test_reports_a_field_the_copy_indexes_nowhere(self):
+        from agol_provision.master import missing_index_coverage
+
+        template = layer_props(indexes=[idx("FDO_GlobalID", "GlobalID")])
+        copy = layer_props(indexes=[idx("CreatorIndex", "Creator")])
+        assert [i["name"] for i in missing_index_coverage(template, copy)] == [
+            "FDO_GlobalID"
+        ]
+
+    def test_ignores_an_index_agol_recreated_under_another_name(self):
+        from agol_provision.master import missing_index_coverage
+
+        template = layer_props(indexes=[idx("I13Creator", "Creator")])
+        copy = layer_props(indexes=[idx("CreatorIndex", "Creator")])
+        assert missing_index_coverage(template, copy) == []
+
+    def test_ignores_a_primary_key_with_a_different_random_suffix(self):
+        from agol_provision.master import missing_index_coverage
+
+        template = layer_props(indexes=[idx("PK__ZAYO_CHI__AAAA", "OBJECTID")])
+        copy = layer_props(indexes=[idx("PK__TestComp__BBBB", "OBJECTID")])
+        assert missing_index_coverage(template, copy) == []
+
+    def test_a_composite_index_is_compared_as_a_whole(self):
+        from agol_provision.master import missing_index_coverage
+
+        template = layer_props(indexes=[idx("compound", "build_status,route_id")])
+        copy = layer_props(indexes=[idx("build_status_Index", "build_status")])
+        assert [i["name"] for i in missing_index_coverage(template, copy)] == ["compound"]
+
+    def test_field_order_does_not_matter(self):
+        from agol_provision.master import missing_index_coverage
+
+        template = layer_props(indexes=[idx("a", "x,y")])
+        copy = layer_props(indexes=[idx("b", "y,x")])
+        assert missing_index_coverage(template, copy) == []
+
+
+class TestSchemaGaps:
+    """What the copy loses and nothing puts back. Reported, never guessed at."""
+
+    def service(self, name, indexes=(), contingent=None):
+        layer = FakeLayer(layer_props(name, indexes, extra_fields=["build_status"]))
+        layer.contingent_values = contingent
+        return FakeFLC([layer])
+
+    def test_reports_a_layer_whose_contingent_values_did_not_survive(self):
+        from agol_provision.master import schema_gaps
+
+        template = self.service("redline", contingent={"contingentValues": [{"id": 1}]})
+        copy = self.service("redline", contingent={})
+        gaps = schema_gaps(template, copy)
+        assert [(g.layer, g.kind) for g in gaps] == [("redline", "contingent values")]
+
+    def test_says_nothing_when_the_template_defines_none(self):
+        from agol_provision.master import schema_gaps
+
+        assert schema_gaps(self.service("redline"), self.service("redline")) == []
+
+    def test_says_nothing_when_the_copy_kept_them(self):
+        from agol_provision.master import schema_gaps
+
+        cv = {"contingentValues": [{"id": 1}]}
+        assert schema_gaps(self.service("a", contingent=cv),
+                           self.service("a", contingent=cv)) == []
+
+    def test_reports_an_index_field_the_copy_covers_nowhere(self):
+        from agol_provision.master import schema_gaps
+
+        template = self.service("redline", indexes=[idx("FDO_GlobalID", "GlobalID")])
+        copy = self.service("redline", indexes=[idx("CreatorIndex", "Creator")])
+        gaps = schema_gaps(template, copy)
+        assert [(g.layer, g.kind) for g in gaps] == [("redline", "index")]
+        assert "GlobalID" in gaps[0].detail
+
+    def test_a_layer_that_cannot_be_read_is_not_reported_as_a_loss(self):
+        """`FeatureLayer.contingent_values` swallows errors and returns {}."""
+        from agol_provision.master import schema_gaps
+
+        template = self.service("redline", contingent=None)
+        assert schema_gaps(template, self.service("redline", contingent=None)) == []

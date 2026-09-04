@@ -35,7 +35,29 @@ SLEEP = time.sleep
 
 def _fail(message: str) -> None:
     err.print(message)
+    _release_polling_threads()
     sys.exit(1)
+
+
+def _release_polling_threads() -> None:
+    """Stop the interpreter joining arcgis's status pollers on the way out.
+
+    `create_view()` hands an AGOL job to a `ThreadPoolExecutor` whose worker polls
+    `while True` with no timeout, and discards the Future, so nothing can cancel
+    it. Those threads are non-daemon and Python joins them at exit -- after stage
+    2 gave up on a stalled view, the process sat with nothing left to do for an
+    hour and a half. Dropping the executor's entry from the registry the atexit
+    hook walks lets the process actually exit.
+
+    Safe here because run state is flushed after every item, so there is nothing
+    buffered that the join would have protected.
+    """
+    try:
+        import concurrent.futures.thread as cf_thread
+
+        cf_thread._threads_queues.clear()
+    except Exception:
+        pass  # private API; if it moves, the worst case is the old hang
 
 
 def copy_whole_service(template: Any, service_name: str) -> Any:
@@ -862,6 +884,8 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         apply_definition_queries,
         read_template_view,
         service_of,
+        add_view_layers,
+        build_view_definition,
         source_layers,
         wait_for_layers,
     )
@@ -916,14 +940,26 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         # AGOL adds a view's layers with an async job that create_view() does not
         # wait for, so the service can report nothing at all for several seconds.
         # Each poll builds a fresh collection: `.layers` is snapshotted once.
+        expected = {lv.name for lv in [*plan.layers, *plan.tables]}
         try:
-            ready = wait_for_layers(
-                lambda: service_of(new_item),
-                {lv.name for lv in [*plan.layers, *plan.tables]},
-                sleep=SLEEP,
-            )
+            ready = wait_for_layers(lambda: service_of(new_item), expected, sleep=SLEEP)
         except ViewError as exc:
-            _fail(f"{spec.key}: {exc}")
+            # The async job never landed. It may have failed -- create_view()
+            # discards the Future, so there is no error anywhere to read. Post the
+            # same definition synchronously, which either works or says why.
+            console.print(f"[yellow]{service_name} still has no layers.[/yellow] "
+                          f"[dim]{exc}[/dim]")
+            console.print("[yellow]Posting them synchronously instead...[/yellow]")
+            try:
+                add_view_layers(
+                    service_of(new_item), build_view_definition(master_flc, plan)
+                )
+                ready = wait_for_layers(
+                    lambda: service_of(new_item), expected, sleep=SLEEP
+                )
+            except ViewError as retry:
+                _fail(f"{spec.key}: {retry}\nThe view exists and is recorded, so "
+                      f"`provision --destroy {state.slug}` will remove it.")
 
         outcomes = apply_definition_queries(ready, plan)
         applied = [o for o in outcomes if o.status == APPLIED]
@@ -1011,7 +1047,13 @@ def _reapply_and_report(template: Any, service: Any) -> None:
     """
     from collections import defaultdict
 
-    from agol_provision.master import APPLIED, FAILED, MasterError, reapply_user_indexes
+    from agol_provision.master import (
+        APPLIED,
+        FAILED,
+        MasterError,
+        reapply_user_indexes,
+        schema_gaps,
+    )
 
     try:
         outcomes = reapply_user_indexes(template, service)
@@ -1022,6 +1064,7 @@ def _reapply_and_report(template: Any, service: Any) -> None:
 
     if not outcomes:
         console.print("[dim]No user-defined indexes to reapply.[/dim]")
+        _report_schema_gaps(template, service)
         return
 
     failed = [o for o in outcomes if o.status == FAILED]
@@ -1044,6 +1087,40 @@ def _reapply_and_report(template: Any, service: Any) -> None:
         err.print("The master exists and is recorded. A missing index is a "
                   "performance problem, not a correctness one -- every view's "
                   "definition query still works.")
+    _report_schema_gaps(template, service)
+
+
+def _report_schema_gaps(template: Any, service: Any) -> None:
+    """Name what the copy lost and this tool does not put back.
+
+    Nothing here is repaired: contingent values have no writer in the arcgis API
+    at all, and an index AGOL declined to recreate may have been declined for a
+    reason. Reporting them is the point -- the indexes sat in a spike report as
+    "83 missing" for months precisely because nobody had classified them.
+    """
+    from collections import defaultdict
+
+    from agol_provision.master import MasterError, schema_gaps
+
+    try:
+        gaps = schema_gaps(template, service)
+    except MasterError as exc:
+        err.print(f"Could not compare the copy against the template: {exc}")
+        return
+    if not gaps:
+        return
+
+    by_kind: dict[str, list[str]] = defaultdict(list)
+    for gap in gaps:
+        by_kind[gap.kind].append(f"{gap.layer}: {gap.detail}")
+
+    console.print("\n[yellow]Not carried over by the copy, and not repaired:[/yellow]")
+    for kind, entries in by_kind.items():
+        console.print(f"  [yellow]{kind}[/yellow] on {len(entries)} layer(s)")
+        for entry in entries[:6]:
+            console.print(f"    [dim]{entry}[/dim]")
+        if len(entries) > 6:
+            console.print(f"    [dim]... and {len(entries) - 6} more[/dim]")
 
 
 def _destroy(slug: str, *, profile: str, yes: bool) -> None:

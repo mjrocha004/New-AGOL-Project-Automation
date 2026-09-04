@@ -124,3 +124,32 @@ class TestEveryDeleteIsGuarded:
         assert all(
             where.startswith("cli.py:") for wheres in sites.values() for where in wheres
         ), sites
+
+
+class TestFailingActuallyExits:
+    """A failed run must end, not hang.
+
+    `create_view()` starts a ThreadPoolExecutor whose worker polls an AGOL job in
+    a `while True` loop with no timeout, and never keeps the Future. Those threads
+    are non-daemon, so the interpreter joins them on the way out. After stage 2
+    gave up on a stalled view, the process sat there for an hour and a half with
+    nothing left to do.
+    """
+
+    def test_fail_releases_the_threads_the_interpreter_would_join(self):
+        import concurrent.futures.thread as cf_thread
+        import pytest
+
+        from agol_provision.cli import _fail
+
+        class Poller:  # _threads_queues is a WeakKeyDictionary
+            pass
+
+        marker = Poller()
+        cf_thread._threads_queues[marker] = "a poller that never returns"
+        try:
+            with pytest.raises(SystemExit):
+                _fail("stopping")
+            assert marker not in cf_thread._threads_queues
+        finally:
+            cf_thread._threads_queues.pop(marker, None)

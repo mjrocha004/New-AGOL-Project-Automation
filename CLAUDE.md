@@ -21,7 +21,8 @@ reapplies the user-defined indexes the copy drops, classified by *fields* rather
 than by name. `provision --destroy` rolls a project back from run state.
 `views.py` creates each view natively from the new master, replaying the
 template's capabilities, layer subset and per-layer definition queries read live
-at provision time. **Stages 0-2 are complete.** Stages 3-6
+at provision time. **Stages 0-2 are built; stage 2 has not yet completed a live
+run** — see Open items. Stages 3-6
 (groups, maps, apps, sharing) are deferred at the user's request: creating four
 groups by hand takes a minute, creating seven views takes a day, so the views
 stage carries nearly all the value and none of the clone/remap risk. The plan
@@ -228,6 +229,32 @@ Real, understood, not yet fixed. Each has already produced a wrong answer once.
   that consumes another app — the Project Viewer ExB consumes the Summary
   dashboard — can be ordered ahead of its own dependency. Must be fixed before
   stage 4.
+
+## Open items — pending live verification
+
+Things only a run against the real org can settle. Written down because they are
+decisions in waiting, not defects.
+
+1. **Stage 2 has never completed a live run.** On 2026-09-04 the `TestCompany /
+   Moline` run built the master cleanly (`10 applied, 4 already present, 0
+   failed`) and then `zayo_chicago_read_only` reported **zero** layers for the
+   full 168s wait. Unknown whether the AGOL job was merely slow or had failed:
+   `create_view()` discards the Future, so a failed job is indistinguishable from
+   a slow one from the client side. **The next thing to check is whether that
+   view eventually got its layers** — if it did, the wait is too short; if it did
+   not, the job failed and the payload needs inspecting. Until then the timeout
+   is a guess.
+2. **The copied master has no GlobalID index.** The template carries
+   `FDO_GlobalID` (unique) on every layer; the copy carries none covering
+   `GlobalID` under any name, while AGOL *did* recreate the editor-tracking
+   indexes and the primary key. Whether AGOL creates it when features first
+   arrive is unknown — the copy is empty, but the primary key exists without
+   data, so index creation is not obviously data-triggered. It matters because
+   several template views carry `Sync`, and offline sync keys on GlobalID.
+   `schema_gaps()` now reports the absence; nothing reapplies it, because an
+   index AGOL declined to create may have been declined for a reason.
+3. **Contingent values are reported, never repaired.** See Known gaps. The report
+   exists so the loss is named; the writer does not exist at all in arcgis.
 
 ## Not in the manifest, on purpose
 

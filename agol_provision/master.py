@@ -250,3 +250,91 @@ def _classify_failure(exc: Exception) -> tuple[str, str]:
     if any(marker in detail.lower() for marker in _DUPLICATE_MARKERS):
         return ALREADY_PRESENT, detail
     return FAILED, detail
+
+
+# ---------------------------------------------------------------- silent losses
+
+# What a schema copy drops and nothing puts back. Neither of these is repaired
+# here -- both are reported, because a named gap can be decided about and a silent
+# one cannot. That is the same lesson the indexes taught: the spike measured them
+# as "83 missing" for months before anyone classified them.
+
+
+@dataclass(frozen=True)
+class SchemaGap:
+    """Something the template has that the copy does not, and nothing restores."""
+
+    layer: str
+    kind: str  # "contingent values" | "index"
+    detail: str
+
+
+def index_field_sets(layer_properties: Any) -> set[frozenset[str]]:
+    """The field combinations a layer has indexed, ignoring index names."""
+    return {
+        frozenset(index_fields(index))
+        for index in (layer_properties.get("indexes", []) or [])
+        if index_fields(index)
+    }
+
+
+def missing_index_coverage(template_properties: Any, new_properties: Any) -> list[dict]:
+    """Template indexes covering a field combination the copy indexes nowhere.
+
+    Compared by **fields**, never by name. AGOL recreates most system indexes
+    under its own names -- the first live run produced `CreatorIndex` where the
+    template had `I13Creator`, and a `PK__TestComp__...` for the template's
+    `PK__ZAYO_CHI__...`. Comparing names calls all of those losses; comparing
+    fields finds the one that really was lost: the template's `FDO_GlobalID` has
+    no counterpart on the copy at all.
+    """
+    covered = index_field_sets(new_properties)
+    return [
+        dict(index)
+        for index in (template_properties.get("indexes", []) or [])
+        if index_fields(index) and frozenset(index_fields(index)) not in covered
+    ]
+
+
+def _contingent_values(layer: Any) -> dict:
+    """A layer's contingent values, or {} when there are none or they cannot be read.
+
+    `FeatureLayer.contingent_values` swallows its own errors and returns {}, so
+    "unreadable" and "none defined" are indistinguishable. Both are treated as
+    "nothing to report" rather than as a loss -- claiming a loss we cannot see is
+    worse than staying quiet about one we cannot confirm.
+    """
+    try:
+        return getattr(layer, "contingent_values", None) or {}
+    except Exception:
+        return {}
+
+
+def schema_gaps(template_service: Any, new_service: Any) -> list[SchemaGap]:
+    """Everything the copy is missing that this tool does not repair.
+
+    Contingent values live at a separate REST sub-resource, so
+    `copy_feature_layer_collection()` -- which builds its payload from each
+    layer's admin definition -- cannot carry them, and arcgis ships no writer for
+    them at all. Reapplying needs raw REST, which is not built.
+    """
+    gaps: list[SchemaGap] = []
+
+    for template_layer, new_layer in _paired_layers(template_service, new_service):
+        name = str(template_layer.properties.get("name", "?"))
+
+        wanted = _contingent_values(template_layer).get("contingentValues")
+        if wanted and not _contingent_values(new_layer).get("contingentValues"):
+            gaps.append(SchemaGap(
+                name, "contingent values",
+                f"{len(wanted)} defined on the template, none on the copy",
+            ))
+
+        for index in missing_index_coverage(template_layer.properties, new_layer.properties):
+            gaps.append(SchemaGap(
+                name, "index",
+                f"{index['name']} on {', '.join(index_fields(index))} -- no index on "
+                f"the copy covers those fields under any name",
+            ))
+
+    return gaps

@@ -151,7 +151,30 @@ def user_defined_indexes(layer_properties: Any) -> list[dict]:
 
 
 def reapply_user_indexes(template_flc: Any, new_flc: Any) -> list[IndexOutcome]:
-    """Put the template's user-defined indexes back on the copy.
+    """Put the template's user-defined indexes back on the copy."""
+    return _reapply(template_flc, new_flc, lambda tpl, _new: user_defined_indexes(tpl))
+
+
+def reapply_missing_coverage(template_flc: Any, new_flc: Any) -> list[IndexOutcome]:
+    """Reapply template indexes covering fields the copy indexes nowhere.
+
+    A second, narrower pass than `reapply_user_indexes`. In practice it finds one
+    thing: the GlobalID index. AGOL recreates the editor-tracking indexes and the
+    primary key under its own names, and keeps its own spatial index, so those
+    are covered -- but the live copy carries nothing over `GlobalID` on any of its
+    18 layers, where the template has `FDO_GlobalID` on some and `GlobalID_Index`
+    on others. Several template views carry `Sync`, and offline sync keys on
+    GlobalID.
+
+    Attempted rather than merely reported, because a rejected batch now retries
+    per index: if AGOL declines, that costs one failed call and finally answers
+    the question, instead of leaving it open forever.
+    """
+    return _reapply(template_flc, new_flc, missing_index_coverage)
+
+
+def _reapply(template_flc: Any, new_flc: Any, select: Any) -> list[IndexOutcome]:
+    """Apply the indexes `select` picks, layer by layer.
 
     Layers are paired by position, which is how the copy was made --
     `copy_feature_layer_collection()` selects by positional index into
@@ -164,7 +187,7 @@ def reapply_user_indexes(template_flc: Any, new_flc: Any) -> list[IndexOutcome]:
 
     for template_layer, new_layer in pairs:
         name = str(template_layer.properties.get("name", "?"))
-        wanted = user_defined_indexes(template_layer.properties)
+        wanted = select(template_layer.properties, new_layer.properties)
         if not wanted:
             continue
 

@@ -1048,15 +1048,17 @@ def _reapply_and_report(template: Any, service: Any) -> None:
     from collections import defaultdict
 
     from agol_provision.master import (
-        APPLIED,
-        FAILED,
         MasterError,
+        reapply_missing_coverage,
         reapply_user_indexes,
-        schema_gaps,
     )
 
     try:
         outcomes = reapply_user_indexes(template, service)
+        # A second, narrower pass: anything the copy indexes nowhere under any
+        # name. In practice that is the GlobalID index, which AGOL recreates for
+        # itself on no layer at all, and which offline sync keys on.
+        coverage = reapply_missing_coverage(template, service)
     except MasterError as exc:
         err.print(f"Indexes were NOT reapplied: {exc}\nThe master exists and is "
                   f"recorded. Fix the cause and re-run to reapply them.")
@@ -1064,19 +1066,31 @@ def _reapply_and_report(template: Any, service: Any) -> None:
 
     if not outcomes:
         console.print("[dim]No user-defined indexes to reapply.[/dim]")
-        _report_schema_gaps(template, service)
-        return
+    else:
+        _summarise_indexes("Indexes", outcomes)
+    if coverage:
+        _summarise_indexes("Indexes AGOL did not recreate", coverage)
+    _report_schema_gaps(template, service)
+
+
+def _summarise_indexes(label: str, outcomes: list[Any]) -> None:
+    """One line per pass, and failures grouped by AGOL's message.
+
+    Grouped because AGOL repeats the same rejection once per index, and one copy
+    per failure buried the summary under a hundred lines of it.
+    """
+    from collections import defaultdict
+
+    from agol_provision.master import APPLIED, FAILED
 
     failed = [o for o in outcomes if o.status == FAILED]
     applied = [o for o in outcomes if o.status == APPLIED]
     console.print(
-        f"Indexes: [green]{len(applied)} applied[/green], "
+        f"{label}: [green]{len(applied)} applied[/green], "
         f"{len(outcomes) - len(applied) - len(failed)} already present, "
         f"{len(failed)} failed"
     )
 
-    # Grouped by message: AGOL repeats the same rejection per index, and one
-    # copy per failure buried the summary line under a hundred lines of it.
     grouped: dict[str, list[str]] = defaultdict(list)
     for outcome in failed:
         grouped[outcome.detail].append(f"{outcome.index} on {outcome.layer}")
@@ -1087,7 +1101,6 @@ def _reapply_and_report(template: Any, service: Any) -> None:
         err.print("The master exists and is recorded. A missing index is a "
                   "performance problem, not a correctness one -- every view's "
                   "definition query still works.")
-    _report_schema_gaps(template, service)
 
 
 def _report_schema_gaps(template: Any, service: Any) -> None:

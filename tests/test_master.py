@@ -474,13 +474,15 @@ class FakeService:
             layer_ids=list(range(len(self.layers))),
             registry=self._registry,
         )
-        # AGOL recreates the system indexes under its own names; the user-defined
-        # ones are the ones the copy loses, which is why stage 1 exists.
+        # AGOL recreates the system indexes under its own names -- except any
+        # over GlobalID, which the live copy carries on none of its 18 layers.
+        # The user-defined ones are the copy's real loss, which is why stage 1
+        # exists.
         for src, dst in zip(self.layers, copy.layers):
             user = {i["name"] for i in user_defined_indexes(src.properties)}
             dst.properties["indexes"] = [
                 dict(i) for i in src.properties.get("indexes", []) or []
-                if i["name"] not in user
+                if i["name"] not in user and index_fields(i) != ["globalid"]
             ]
         return copy
 
@@ -712,6 +714,25 @@ class TestProvisionStage1:
         result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         assert result.output.count("Invalid definition (400)") == 1
         assert "layer_8" in result.output
+
+    def test_restores_the_globalid_index_agol_does_not_recreate(
+        self, monkeypatch, manifest_file, state_dir, registry
+    ):
+        """The one index AGOL creates nothing equivalent to, on any layer."""
+        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
+                    typeKeywords=["View Service"])
+        FakeService(TEMPLATE_MASTER, "Zayo Chicago", layer_names=["redline"],
+                    registry=registry,
+                    indexes=[idx("build_status_Index", "build_status"),
+                             dict(idx("FDO_GlobalID", "GlobalID"), isUnique=True)])
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 0, result.output
+        applied = [
+            i["name"] for layer in registry["c" * 32].layers
+            for call in layer.manager.calls for i in call["indexes"]
+        ]
+        assert "FDO_GlobalID" in applied
+        assert "Not carried over" not in result.output
 
     def test_reports_contingent_values_the_copy_lost(
         self, monkeypatch, manifest_file, state_dir, registry
@@ -1041,6 +1062,63 @@ class TestMissingIndexCoverage:
         template = layer_props(indexes=[idx("a", "x,y")])
         copy = layer_props(indexes=[idx("b", "y,x")])
         assert missing_index_coverage(template, copy) == []
+
+
+class TestReapplyMissingCoverage:
+    """A second pass for what the copy indexes nowhere -- in practice, GlobalID.
+
+    AGOL recreates the editor-tracking indexes and the primary key under its own
+    names, but creates nothing covering GlobalID: the live copy has no such index
+    on any of its 18 layers, where the template has `FDO_GlobalID` on some and
+    `GlobalID_Index` on others. Several template views carry `Sync`, and offline
+    sync keys on GlobalID, so this one is worth attempting rather than only
+    reporting. Attempting is cheap now that a rejected batch retries per index.
+    """
+
+    def test_applies_an_index_the_copy_covers_nowhere(self):
+        from agol_provision.master import reapply_missing_coverage
+
+        tpl, new, copy = template_and_copy([idx("FDO_GlobalID", "GlobalID")])
+        outcomes = reapply_missing_coverage(tpl, new)
+        assert [(o.index, o.status) for o in outcomes] == [("FDO_GlobalID", "applied")]
+
+    def test_leaves_alone_what_agol_recreated_under_another_name(self):
+        from agol_provision.master import reapply_missing_coverage
+
+        tpl, new, copy = template_and_copy(
+            [idx("I13Creator", "Creator")],
+            copy_indexes=[idx("CreatorIndex", "Creator")],
+        )
+        assert reapply_missing_coverage(tpl, new) == []
+        assert copy.manager.calls == []
+
+    def test_does_not_retry_the_spatial_index(self):
+        """The copy has its own `_Shape_sidx`, so the fields are covered."""
+        from agol_provision.master import reapply_missing_coverage
+
+        tpl, new, copy = template_and_copy(
+            [idx("user_57996.X_Shape_sidx", "Shape")],
+            copy_indexes=[idx("TestCompany_Shape_sidx", "Shape")],
+        )
+        assert reapply_missing_coverage(tpl, new) == []
+
+    def test_a_rejection_is_reported_not_raised(self):
+        """AGOL may decline to recreate a GlobalID index, and that is an answer."""
+        from agol_provision.master import reapply_missing_coverage
+
+        tpl, new, copy = template_and_copy(
+            [idx("FDO_GlobalID", "GlobalID")], rejects={"FDO_GlobalID"}
+        )
+        assert [o.status for o in reapply_missing_coverage(tpl, new)] == ["failed"]
+
+    def test_keeps_the_templates_uniqueness(self):
+        """`FDO_GlobalID` is unique on the template; a non-unique copy is not it."""
+        from agol_provision.master import reapply_missing_coverage
+
+        unique = dict(idx("FDO_GlobalID", "GlobalID"), isUnique=True)
+        tpl, new, copy = template_and_copy([unique])
+        reapply_missing_coverage(tpl, new)
+        assert copy.manager.calls[0]["indexes"][0]["isUnique"] is True
 
 
 class TestSchemaGaps:

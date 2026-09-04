@@ -29,6 +29,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# `create_view()` returns before ArcGIS Online has finished adding the layers: it
+# calls `add_to_definition(..., future=True)` and discards the Future. The
+# schedule below tops out around 170s, which is generous next to the largest view
+# (18 layers). Fixed rather than randomised, so a run is reproducible.
+LAYER_WAIT_BACKOFF: tuple[float, ...] = (0.0, 2.0, 3.0, 5.0, 8.0) + (10.0,) * 15
+
 APPLIED = "applied"
 MISSING = "missing"
 FAILED = "failed"
@@ -95,6 +101,59 @@ def _layer_view(layer: Any) -> LayerView:
         layer_id=props.get("id"),
         name=str(props.get("name", "")),
         query=str(props.get("viewDefinitionQuery", "") or ""),
+    )
+
+
+def _names_of(service: Any) -> set[str]:
+    """Layer and table names a service currently reports. Tolerates duplicates."""
+    return {
+        str(layer.properties.get("name", ""))
+        for layer in [*service.layers, *service.tables]
+    }
+
+
+def wait_for_layers(
+    fetch: Any,
+    expected_names: set[str],
+    *,
+    sleep: Any,
+    backoff: tuple[float, ...] = LAYER_WAIT_BACKOFF,
+) -> Any:
+    """Block until a newly created view really exposes every layer it should.
+
+    `create_view()` adds a view's layers with an asynchronous server job and
+    throws away the Future that tracks it, so the item it returns can describe a
+    service with no layers at all. Reading it immediately -- as the first live run
+    did -- finds nothing and reports every layer missing, moments before they all
+    appear.
+
+    ``fetch`` must build a **new** service object each call. A retained
+    `FeatureLayerCollection` cannot show the change: its `.layers` is a plain
+    attribute assigned once during construction, not a property.
+
+    A fetch that raises is treated as "not ready yet" rather than fatal, because a
+    half-built service can answer with an error instead of an empty list.
+    """
+    seen: set[str] = set()
+    for delay in backoff:
+        if delay:
+            sleep(delay)
+        try:
+            service = fetch()
+            seen = _names_of(service)
+        except Exception:
+            continue
+        if expected_names <= seen:
+            return service
+
+    waited = sum(backoff)
+    missing = sorted(expected_names - seen)
+    raise ViewError(
+        f"Waited {waited:.0f}s and the new view still does not report "
+        f"{', '.join(repr(n) for n in missing)}. It reports: "
+        f"{', '.join(sorted(seen)) or '(nothing)'}. AGOL adds a view's layers "
+        f"asynchronously, so this is either an unusually slow job or a failed one "
+        f"-- the item exists and is recorded, so `--destroy` will clean it up."
     )
 
 

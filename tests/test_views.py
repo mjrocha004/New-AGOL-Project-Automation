@@ -22,6 +22,7 @@ from agol_provision.views import (
     apply_definition_queries,
     read_template_view,
     source_layers,
+    wait_for_layers,
 )
 
 
@@ -155,6 +156,83 @@ class TestSourceLayers:
             source_layers(flc, plan)
 
 
+# ---------------------------------------------------------------- the async gap
+
+
+class TestWaitForLayers:
+    """`create_view()` returns before the view's layers exist.
+
+    On ArcGIS Online it calls `add_to_definition(..., future=True)` and discards
+    the Future, so the item comes back describing a service whose layers are
+    still being committed. The first live run applied definition queries to
+    nothing at all on four views, and to 5 of 7 layers on another -- a race it
+    partly won. Every layer reported "missing" was really there moments later.
+    """
+
+    def fetcher(self, *snapshots):
+        """Successive views of the service, as separate objects.
+
+        A retained FeatureLayerCollection cannot show the change: `.layers` is a
+        plain attribute assigned once in `_populate_layers`, so each poll has to
+        build a new one.
+        """
+        seen = iter(snapshots)
+        return lambda: next(seen)
+
+    def test_returns_at_once_when_the_layers_are_already_there(self):
+        ready = FakeService([FakeLayer(0, "a"), FakeLayer(1, "b")])
+        slept = []
+        got = wait_for_layers(self.fetcher(ready), {"a", "b"}, sleep=slept.append)
+        assert got is ready
+        assert slept == []
+
+    def test_polls_until_the_layers_appear(self):
+        """The live case: the first look showed an empty service."""
+        empty = FakeService([])
+        partial = FakeService([FakeLayer(0, "a")])
+        ready = FakeService([FakeLayer(0, "a"), FakeLayer(1, "b")])
+        slept = []
+        got = wait_for_layers(
+            self.fetcher(empty, partial, ready), {"a", "b"}, sleep=slept.append
+        )
+        assert got is ready
+        assert len(slept) == 2
+
+    def test_waits_for_tables_too(self):
+        ready = FakeService([FakeLayer(0, "a")], [FakeLayer(1, "Notes")])
+        got = wait_for_layers(self.fetcher(ready), {"a", "Notes"}, sleep=lambda _: None)
+        assert got is ready
+
+    def test_gives_up_and_says_what_it_saw(self):
+        """A timeout must not read as a network hang."""
+        empty = FakeService([FakeLayer(0, "a")])
+        with pytest.raises(ViewError, match="'b'"):
+            wait_for_layers(
+                lambda: empty, {"a", "b"}, sleep=lambda _: None, backoff=(0.0, 1.0)
+            )
+
+    def test_never_sleeps_before_looking(self):
+        """A fast org should pay nothing for the poll."""
+        slept = []
+        wait_for_layers(
+            self.fetcher(FakeService([FakeLayer(0, "a")])), {"a"}, sleep=slept.append
+        )
+        assert slept == []
+
+    def test_tolerates_a_fetch_that_throws_while_the_service_settles(self):
+        """A half-built service can 400 rather than return an empty list."""
+        ready = FakeService([FakeLayer(0, "a")])
+        calls = iter([RuntimeError("Invalid URL"), ready])
+
+        def fetch():
+            got = next(calls)
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+        assert wait_for_layers(fetch, {"a"}, sleep=lambda _: None) is ready
+
+
 # ---------------------------------------------------------------- queries
 
 
@@ -260,12 +338,16 @@ class TestProvisionStage2:
         master = AgolService(
             TEMPLATE_MASTER, "Zayo Chicago", registry=registry,
             layer_names=["Redline", "Bores", "Splice"], layer_ids=[11, 12, 19],
+            snippet="Master snippet", description="Master description",
+            tags=["Zayo", "Chicago"],
         )
         # Two of the seven real views filter differently per layer.
         AgolService(
             UNIFORM_VIEW, "Read Only", registry=registry, typeKeywords=["View Service"],
             layer_names=["Redline", "Bores"], layer_ids=[11, 12],
             capabilities="Query", queries={"Redline": UNIFORM_Q, "Bores": UNIFORM_Q},
+            snippet="Read-only access", description="What the viewer group sees",
+            tags=["viewer", "read-only"],
         )
         AgolService(
             PER_LAYER_VIEW, "Redline QC", registry=registry, typeKeywords=["View Service"],
@@ -292,6 +374,13 @@ class TestProvisionStage2:
             ],
         }))
         return path
+
+    @pytest.fixture(autouse=True)
+    def no_real_sleeping(self, monkeypatch):
+        """The wait itself is covered by TestWaitForLayers; do not pay for it here."""
+        from agol_provision import cli
+
+        monkeypatch.setattr(cli, "SLEEP", lambda _: None)
 
     @pytest.fixture
     def state_dir(self, tmp_path, monkeypatch):
@@ -428,6 +517,81 @@ class TestProvisionStage2:
     ):
         self.invoke(monkeypatch, manifest_file, state_dir, registry, ["--dry-run"])
         assert templates.manager.create_view_calls == []
+
+    def test_survives_a_view_whose_layers_are_not_there_yet(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """The live failure: create_view() returns before AGOL adds the layers.
+
+        The first look at each new view showed an empty service, so every
+        definition query was reported missing and none was applied.
+        """
+        from agol_provision import views
+
+        class NotReadyYet:
+            """The same service, before its layers have been committed."""
+
+            def __init__(self, item):
+                self.properties = item.properties
+                self.layers = []
+                self.tables = []
+
+        first_look = set()
+        templates_ids = {TEMPLATE_MASTER, UNIFORM_VIEW, PER_LAYER_VIEW}
+
+        def service_of(item):
+            new_view = item.itemid not in templates_ids and "View Service" in item.typeKeywords
+            if new_view and item.itemid not in first_look:
+                first_look.add(item.itemid)
+                return NotReadyYet(item)
+            return item
+
+        monkeypatch.setattr(views, "service_of", service_of)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 0, result.output
+        view = self.created_views(registry)["CompanyA Moline (Read-Only)"]
+        assert [lyr.manager.calls for lyr in view.layers] == [
+            [{"viewDefinitionQuery": UNIFORM_Q}], [{"viewDefinitionQuery": UNIFORM_Q}]
+        ]
+
+    def test_an_unapplied_definition_query_fails_the_run(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """A view whose filter never applied is unfiltered, not merely imperfect.
+
+        These are shared to subcontractors, so it leaks rows. Better to stop and
+        let --destroy clean up than to report Created and move on.
+        """
+        from agol_provision import views
+
+        real = views.apply_definition_queries
+
+        def failing(new_view, plan):
+            outcomes = real(new_view, plan)
+            return [
+                views.QueryOutcome(o.layer, views.FAILED, "Invalid URL (400)")
+                if i == 0 else o
+                for i, o in enumerate(outcomes)
+            ]
+
+        monkeypatch.setattr(views, "apply_definition_queries", failing)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 1
+        assert "Invalid URL (400)" in result.output
+
+    def test_copies_the_template_views_own_snippet_description_and_tags(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """create_view() falls back to the SOURCE service's item for these.
+
+        The source is the new master, so every view inherited the master's
+        description and tags instead of the template view's.
+        """
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        view = self.created_views(registry)["CompanyA Moline (Read-Only)"]
+        assert view.snippet == "Read-only access"
+        assert view.description == "What the viewer group sees"
+        assert view.tags == ["viewer", "read-only"]
 
     def test_a_master_missing_a_layer_the_view_needs_stops_the_run(
         self, monkeypatch, manifest_file, state_dir, registry

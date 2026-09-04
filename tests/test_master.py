@@ -417,9 +417,13 @@ class FakeService:
 
     def __init__(self, itemid, title, layer_names=("redline",), registry=None,
                  typeKeywords=("Hosted Service",), indexes=None, copy_returns=True,
-                 capabilities="Query", queries=None, layer_ids=None):
+                 capabilities="Query", queries=None, layer_ids=None,
+                 snippet="", description="", tags=None):
         self.itemid = itemid
         self.title = title
+        self.snippet = snippet
+        self.description = description
+        self.tags = list(tags or [])
         self.type = "Feature Service"
         self.typeKeywords = list(typeKeywords)
         # Layer ids deliberately do not start at 0 and are not contiguous: the
@@ -464,6 +468,9 @@ class FakeService:
         props = item_properties or kwargs
         self.updates.append(props)
         self.title = props.get("title", self.title)
+        self.snippet = props.get("snippet", self.snippet)
+        self.description = props.get("description", self.description)
+        self.tags = props.get("tags", self.tags)
         return True
 
     def delete(self):

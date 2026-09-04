@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 430 tests pass, none needing network access.
+the master schema copies faithfully. 441 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -425,6 +425,21 @@ also rewrites that first layer's field visibility as a side effect. Every
 definition query is applied per layer instead, for every view, whether or not the
 template's queries are uniform. Two of the seven templates filter differently per
 layer; the other five happen to be uniform, and are treated identically.
+
+**`create_view()` does not wait for the layers it just asked for.** On ArcGIS
+Online it starts an asynchronous server job and discards the handle that tracks
+it, so the view it hands back can report no layers at all for several seconds.
+Provisioning polls until every expected layer appears — rebuilding the collection
+each time, because a `FeatureLayerCollection` snapshots its layer list once and
+never updates it — and only then applies the queries.
+
+**A definition query that does not apply stops the run.** A view missing its
+filter is unfiltered, not slightly wrong, and these get shared to subcontractors.
+The view is recorded in state first, so `--destroy` removes it.
+
+Each view's summary, description and tags are copied from the **template view**.
+Left alone, `create_view()` fills them in from the source service's item — which
+is the new master, so every view would carry the master's blurb.
 
 No `visible_fields` handling exists. Field visibility is uniform across all seven
 template views and none hides a field, so that path is not built on spec. If a

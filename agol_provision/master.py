@@ -12,6 +12,14 @@ spatial indexes scoped to the owning account, editor-tracking indexes renumbered
 on creation, and GlobalID indexes recreated with the field. Ten are real:
 `build_status_Index` on 9 layers and `I25bore_depth` on 1.
 
+The first live run confirmed the renumbering rather than merely predicting it.
+`copy_feature_layer_collection()` deletes `indexes` from every layer definition
+before posting it, and this module drops every single-system-field index, so the
+creation request carried *no* GlobalID or editor-tracking index at all -- yet the
+copy has them, under names without the template's `I25` prefix. ArcGIS Online
+creates them itself from the GlobalID field and the copied editor-tracking
+settings. Nothing names an index but the query planner, so nothing is lost.
+
 `build_status_Index` is the one that matters. `build_status` is the field that
 *every* view's definition query filters on, so a master without it makes all
 seven views table-scan.

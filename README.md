@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 464 tests pass, none needing network access.
+the master schema copies faithfully. 470 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -356,6 +356,12 @@ is treated as system-generated when either:
   geometry field there, so this is what catches a spatial index
   (`user_<id>.<LAYER>_Shape_sidx`) — and an index over a field that is not there
   would be rejected anyway.
+
+A second, narrower pass reapplies anything the copy indexes **nowhere under any
+name** — compared by fields, since AGOL renames what it recreates. In practice
+that finds one thing: the GlobalID index. AGOL rebuilds the editor-tracking
+indexes and the primary key for itself but creates nothing over `GlobalID`, and
+several template views carry `Sync`, which keys on it.
 
 A duplicate-index error from AGOL is tolerated rather than fatal. Indexes are
 applied one call per layer, but AGOL rejects the whole call if any single index

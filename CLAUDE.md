@@ -108,6 +108,13 @@ package AST and fails if a `delete()` appears in any other function -- a third
 delete path has to be a deliberate edit to that list. An orphaned test service is
 a nuisance; deleting the wrong thing is not.
 
+**`runlog.py` records what a run did, next to its state.** `state/<slug>.log`
+gets one appended line per logical operation with an ISO timestamp and elapsed
+ms — not per HTTP call, because every failure so far has been at the level of
+"which view, and how long before it gave up". Writes are swallowed on error: a
+log that breaks the run it records is worse than no log. `--dry-run` passes a
+`None` path, which disables it entirely rather than making callers check.
+
 **Discovery derives the dependency graph by scanning serialized item JSON** for
 the ids of other template items, rather than parsing each item type's schema.
 Web maps, dashboards, and Experience Builder apps all nest their references
@@ -164,6 +171,15 @@ rather than an error:
 - **`--profile home` requires ArcGIS Pro's Python**, because it reads the sign-in
   token through `arcpy`. It cannot work from a standalone venv — use a stored
   profile there.
+- **AGOL recreates every system index except the GlobalID one.** A copied master
+  arrives with editor-tracking indexes and a primary key AGOL built itself, under
+  its own names -- but nothing covering `GlobalID` on any layer, where the
+  template has `FDO_GlobalID` on some and `GlobalID_Index` on others. It matters
+  because several template views carry `Sync`, and offline sync keys on GlobalID.
+  `reapply_missing_coverage()` puts it back and **AGOL accepts it**: 18 applied,
+  0 failed, confirmed on all 18 layers of a live run. The gap is only findable
+  because coverage is compared by *fields*; by name, `CreatorIndex` vs
+  `I13Creator` and `PK__TestComp__` vs `PK__ZAYO_CHI__` read as losses too.
 - **A layer's `fields` does not include the geometry field.** So looking for
   `esriFieldTypeGeometry` to identify the shape field finds nothing, and a
   spatial index (`user_<id>.<LAYER>_Shape_sidx`) reads as user-defined. AGOL then
@@ -252,7 +268,7 @@ decisions in waiting, not defects.
    10 indexes and its views materialised immediately. That hypothesis is dead;
    treat the earlier failure as unexplained, most likely transient.
 
-3. **Contingent values are reported, never repaired.** See Known gaps. The report
+2. **Contingent values are reported, never repaired.** See Known gaps. The report
    exists so the loss is named; the writer does not exist at all in arcgis.
 
 ## Not in the manifest, on purpose

@@ -460,10 +460,31 @@ class TestProvisionCommand:
         assert result.exit_code == 0, result.output
         assert not state_dir.exists()
 
-    def test_a_failed_preflight_writes_no_state(self, monkeypatch, manifest_file, state_dir):
-        """A real run, not a dry one: preflight must gate stage 1's first write."""
+    def test_a_failed_preflight_records_no_created_items(
+        self, monkeypatch, manifest_file, state_dir
+    ):
+        """A real run, not a dry one: preflight must gate stage 1's first write.
+
+        The run *log* is written either way -- a name collision is exactly the
+        kind of thing worth having a record of. Run state is not: it lists what
+        exists in AGOL, and nothing does.
+        """
         gis = FakeGIS(taken=["CompanyA_Moline"])
         self.invoke(monkeypatch, manifest_file, state_dir, gis, dry_run=False)
+        assert not (state_dir / "companya-moline.json").exists()
+
+    def test_a_failed_preflight_says_so_in_the_log(
+        self, monkeypatch, manifest_file, state_dir
+    ):
+        gis = FakeGIS(taken=["CompanyA_Moline"])
+        self.invoke(monkeypatch, manifest_file, state_dir, gis, dry_run=False)
+        written = (state_dir / "companya-moline.log").read_text()
+        assert "preflight  3 planned, 1 error(s)" in written
+        assert "stopped  preflight failed with 1 problem(s)" in written
+
+    def test_a_dry_run_writes_no_log_either(self, monkeypatch, manifest_file, state_dir):
+        """--dry-run promises to write nothing at all."""
+        self.invoke(monkeypatch, manifest_file, state_dir)
         assert not state_dir.exists()
 
     def test_company_and_location_are_required_together(self, monkeypatch, state_dir):

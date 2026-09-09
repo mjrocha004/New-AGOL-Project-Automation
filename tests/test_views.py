@@ -773,6 +773,32 @@ class TestProvisionStage2:
         assert view.description == "What the viewer group sees"
         assert view.tags == ["viewer", "read-only"]
 
+    def test_the_log_records_the_whole_run_in_order(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """One line per logical operation, which is the grain failures occur at."""
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        labels = [
+            line.split("  ")[-2].strip() if "  " in line else line
+            for line in (state_dir / "companya-moline.log").read_text().splitlines()
+        ]
+        text = (state_dir / "companya-moline.log").read_text()
+        for expected in ("provision", "preflight", "master.copy", "master.indexes",
+                         "views.create", "views.wait", "views.queries", "done"):
+            assert expected in text, f"{expected} missing from the log"
+        assert text.index("master.copy") < text.index("views.create")
+        assert "ms  " in text  # every step carries a duration
+        assert labels  # and every line parses
+
+    def test_the_log_names_the_item_each_step_was_on(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """"How long did that take" is never useful without "on which one"."""
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        text = (state_dir / "companya-moline.log").read_text()
+        assert "views.create  CompanyA_Moline_Read_Only" in text
+        assert "views.queries  CompanyA_Moline_QC" in text
+
     def test_a_master_missing_a_layer_the_view_needs_stops_the_run(
         self, monkeypatch, manifest_file, state_dir, registry
     ):

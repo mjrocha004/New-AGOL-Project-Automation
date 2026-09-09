@@ -770,6 +770,7 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
         STATUS_TAKEN,
         run_preflight,
     )
+    from agol_provision.runlog import RunLog
     from agol_provision.state import ProjectState, StateError
 
     if destroy_slug:
@@ -811,12 +812,20 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
     except StateError as exc:
         _fail(str(exc))
 
+    # A dry run promises to write nothing at all, the log included.
+    log = RunLog(None if dry_run else STATE_DIR / f"{slug}.log")
+    log.event("provision", f"{company} / {location}  --  manifest {manifest.name} "
+                           f"v{manifest.version}  as {gis.users.me.username}")
+
     mode = "dry run, nothing will be written" if dry_run else "live run"
     console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
     console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} -- {path}")
     console.print(f"Project [cyan]{company} / {location}[/cyan]  ({slug}, {mode})\n")
 
-    report = run_preflight(gis, manifest, ctx, state=state)
+    with log.step("preflight") as note:
+        report = run_preflight(gis, manifest, ctx, state=state)
+        note.detail = (f"{len(report.plan)} planned, {len(report.errors)} error(s), "
+                       f"{len(report.warnings)} warning(s)")
 
     styles = {
         STATUS_AVAILABLE: "green",
@@ -854,6 +863,7 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
                 "Nothing is renamed automatically -- a service carrying a name nobody "
                 "chose is worse than a stopped run."
             )
+        log.event("stopped", f"preflight failed with {len(report.errors)} problem(s)")
         _fail(f"\nPREFLIGHT FAILED -- {len(report.errors)} problem(s). "
               f"Nothing was created.")
 
@@ -864,10 +874,11 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
         return
 
     state.complete_stage("preflight")
-    _create_master(gis, manifest, ctx, state)
+    _create_master(gis, manifest, ctx, state, log)
     state.complete_stage("master")
-    _create_views(gis, manifest, ctx, state)
+    _create_views(gis, manifest, ctx, state, log)
     state.complete_stage("views")
+    log.event("done", f"{len(state.items)} item(s) created")
 
     console.print(
         f"\n[bold green]Done.[/bold green] {len(state.items)} item(s) created. "
@@ -875,7 +886,7 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
     )
 
 
-def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
+def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> None:
     """Stage 2: create each view natively from the new master and replay it."""
     from agol_provision.state import CreatedItem
     from agol_provision.views import (
@@ -912,13 +923,16 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         # `query=` is deliberately not passed. It reaches layers[0] only, so on a
         # view spanning eighteen layers the rest would be created unfiltered --
         # and these are shared to subcontractors.
-        new_item = master_flc.manager.create_view(
-            name=service_name,
-            capabilities=plan.capabilities,
-            view_layers=view_layers,
-            view_tables=view_tables,
-            preserve_layer_ids=True,
-        )
+        with log.step("views.create", service_name) as note:
+            new_item = master_flc.manager.create_view(
+                name=service_name,
+                capabilities=plan.capabilities,
+                view_layers=view_layers,
+                view_tables=view_tables,
+                preserve_layer_ids=True,
+            )
+            note.detail = (f"{service_name}  {len(view_layers)} layer(s), "
+                           f"{len(view_tables)} table(s), caps {plan.capabilities}")
         if new_item is None:
             _fail(f"create_view() returned None for {service_name}. Nothing was "
                   f"recorded; check the org before re-running.")
@@ -942,7 +956,10 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
         # Each poll builds a fresh collection: `.layers` is snapshotted once.
         expected = {lv.name for lv in [*plan.layers, *plan.tables]}
         try:
-            ready = wait_for_layers(lambda: service_of(new_item), expected, sleep=SLEEP)
+            with log.step("views.wait", service_name):
+                ready = wait_for_layers(
+                    lambda: service_of(new_item), expected, sleep=SLEEP
+                )
         except ViewError as exc:
             # The async job never landed. It may have failed -- create_view()
             # discards the Future, so there is no error anywhere to read. Post the
@@ -951,17 +968,22 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
                           f"[dim]{exc}[/dim]")
             console.print("[yellow]Posting them synchronously instead...[/yellow]")
             try:
-                add_view_layers(
-                    service_of(new_item), build_view_definition(master_flc, plan)
-                )
-                ready = wait_for_layers(
-                    lambda: service_of(new_item), expected, sleep=SLEEP
-                )
+                with log.step("views.add_layers", service_name):
+                    add_view_layers(
+                        service_of(new_item), build_view_definition(master_flc, plan)
+                    )
+                    ready = wait_for_layers(
+                        lambda: service_of(new_item), expected, sleep=SLEEP
+                    )
             except ViewError as retry:
                 _fail(f"{spec.key}: {retry}\nThe view exists and is recorded, so "
                       f"`provision --destroy {state.slug}` will remove it.")
 
-        outcomes = apply_definition_queries(ready, plan)
+        with log.step("views.queries", service_name) as note:
+            outcomes = apply_definition_queries(ready, plan)
+            note.detail = (f"{service_name}  "
+                           f"{sum(1 for o in outcomes if o.status == APPLIED)} of "
+                           f"{len(outcomes)} applied")
         applied = [o for o in outcomes if o.status == APPLIED]
         problems = [o for o in outcomes if o.status != APPLIED]
         shape = "uniform" if plan.uniform_query else "per-layer"
@@ -982,7 +1004,7 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
                   f"in state -- `provision --destroy {state.slug}` removes it.")
 
 
-def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
+def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> None:
     """Stage 1: copy the template master, name it, and put its indexes back."""
     from agol_provision.state import CreatedItem
 
@@ -1004,12 +1026,15 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
                   f"re-run with a service name that is still free.")
         console.print(f"[dim]Already created as {existing.item_id}; "
                       f"rechecking indexes.[/dim]")
-        _reapply_and_report(template, already)
+        _reapply_and_report(template, already, log)
         return
 
     console.print(f"Copying [cyan]{template.title}[/cyan] to [cyan]{service_name}[/cyan] "
                   f"({len(template.layers)} layer(s), {len(template.tables)} table(s))...")
-    copy_item = copy_whole_service(template, service_name)
+    with log.step("master.copy", service_name) as note:
+        copy_item = copy_whole_service(template, service_name)
+        note.detail = (f"{service_name}  {len(template.layers)} layer(s), "
+                       f"{len(template.tables)} table(s)")
     if copy_item is None:
         _fail(f"copy_feature_layer_collection() returned None -- the copy failed. "
               f"Nothing was recorded, so check the org for a partial service named "
@@ -1035,10 +1060,10 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any) -> None:
     })
     console.print(f"Item title set to [cyan]{title}[/cyan]")
 
-    _reapply_and_report(template, copy_item)
+    _reapply_and_report(template, copy_item, log)
 
 
-def _reapply_and_report(template: Any, service: Any) -> None:
+def _reapply_and_report(template: Any, service: Any, log: Any) -> None:
     """Put the template's user-defined indexes back, and say what happened.
 
     The copy strips every index, so the ten user-defined ones go back by hand.
@@ -1054,11 +1079,15 @@ def _reapply_and_report(template: Any, service: Any) -> None:
     )
 
     try:
-        outcomes = reapply_user_indexes(template, service)
+        with log.step("master.indexes") as note:
+            outcomes = reapply_user_indexes(template, service)
+            note.detail = _index_tally(outcomes)
         # A second, narrower pass: anything the copy indexes nowhere under any
         # name. In practice that is the GlobalID index, which AGOL recreates for
         # itself on no layer at all, and which offline sync keys on.
-        coverage = reapply_missing_coverage(template, service)
+        with log.step("master.indexes.coverage") as note:
+            coverage = reapply_missing_coverage(template, service)
+            note.detail = _index_tally(coverage)
     except MasterError as exc:
         err.print(f"Indexes were NOT reapplied: {exc}\nThe master exists and is "
                   f"recorded. Fix the cause and re-run to reapply them.")
@@ -1071,6 +1100,15 @@ def _reapply_and_report(template: Any, service: Any) -> None:
     if coverage:
         _summarise_indexes("Indexes AGOL did not recreate", coverage)
     _report_schema_gaps(template, service)
+
+
+def _index_tally(outcomes: list[Any]) -> str:
+    """`10 applied, 4 present, 0 failed` -- the line worth reading back later."""
+    from agol_provision.master import APPLIED, FAILED
+
+    applied = sum(1 for o in outcomes if o.status == APPLIED)
+    failed = sum(1 for o in outcomes if o.status == FAILED)
+    return f"{applied} applied, {len(outcomes) - applied - failed} present, {failed} failed"
 
 
 def _summarise_indexes(label: str, outcomes: list[Any]) -> None:
@@ -1144,8 +1182,10 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
     touched -- anything this tool merely found is left alone.
     """
     from agol_provision.auth import AuthError, connect, describe
+    from agol_provision.runlog import RunLog
     from agol_provision.state import ProjectState, StateError
 
+    log = RunLog(STATE_DIR / f"{slug}.log")
     path = STATE_DIR / f"{slug}.json"
     if not path.exists():
         _fail(f"No run state for {slug!r} at {path}. --destroy only deletes items this "
@@ -1175,6 +1215,7 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
     if not yes:
         click.confirm("Delete these?", abort=True)
 
+    log.event("destroy", f"{len(items)} recorded item(s)")
     for item in items:
         obj = gis.content.get(item.item_id)
         if obj is None:
@@ -1182,7 +1223,8 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
             state.forget(item.key)
             continue
         try:
-            obj.delete()
+            with log.step("destroy.delete", f"{item.title} ({item.item_id})"):
+                obj.delete()
         except Exception as exc:
             err.print(f"Could not delete {item.title} ({item.item_id}): {exc}")
             _fail("Stopped. Everything not yet deleted is still recorded, so re-running "
@@ -1191,6 +1233,7 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
         state.forget(item.key)
         console.print(f"[green]Deleted[/green] {item.title}")
 
+    log.event("destroy.done", f"{len(items)} item(s) deleted")
     console.print(f"\n[green]{slug} rolled back.[/green]")
 
 

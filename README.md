@@ -13,7 +13,7 @@ Targets Windows with ArcGIS Pro installed.
 ## Status
 
 Phase 0 is built: `discover` audits the templates, `spike-master` proves whether
-the master schema copies faithfully. 470 tests pass, none needing network access.
+the master schema copies faithfully. 485 tests pass, none needing network access.
 
 Phase 0 has now run against the real organization and both questions it existed
 to answer are settled:
@@ -462,6 +462,28 @@ template starts hiding fields, `discover` reports `Uniform fields: False`.
 Views are recorded in state after the master, which is what makes `--destroy`
 delete them first — AGOL refuses to delete a feature service while its views
 still exist.
+
+### The run log
+
+Every live run appends to `state/<slug>.log`: one line per logical operation,
+with an ISO timestamp and how long it took.
+
+```
+2026-09-09T16:22:22+00:00              provision  TestCompany / Davenport  --  manifest vsclr-standard v1  as m.rocha
+2026-09-09T16:22:34+00:00     11804ms  master.copy  TestCompany_Davenport  17 layer(s), 1 table(s)
+2026-09-09T16:22:41+00:00      6903ms  master.indexes  10 applied, 4 present, 0 failed
+2026-09-09T16:22:48+00:00      7220ms  master.indexes.coverage  18 applied, 0 present, 0 failed
+2026-09-09T16:23:02+00:00     13551ms  views.create  TestCompany_Davenport_Read_Only  17 layer(s), 1 table(s), caps Query,Extract
+2026-09-09T16:23:05+00:00      2604ms  views.wait  TestCompany_Davenport_Read_Only
+2026-09-09T16:23:09+00:00      4011ms  views.queries  TestCompany_Davenport_Read_Only  0 of 0 applied
+```
+
+It records logical operations rather than HTTP calls, because that is the grain
+the failures have actually occurred at: which view, which index pass, how long
+before it gave up. A step that fails is recorded as `FAILED <step>` with AGOL's
+message collapsed onto one line, so a run that stopped shows *where*.
+
+`--destroy` appends to the same file. `--dry-run` writes nothing, log included.
 
 ### Rolling a project back
 

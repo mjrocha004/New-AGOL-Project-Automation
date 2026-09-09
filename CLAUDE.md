@@ -108,6 +108,13 @@ package AST and fails if a `delete()` appears in any other function -- a third
 delete path has to be a deliberate edit to that list. An orphaned test service is
 a nuisance; deleting the wrong thing is not.
 
+**`runlog.py` records what a run did, next to its state.** `state/<slug>.log`
+gets one appended line per logical operation with an ISO timestamp and elapsed
+ms — not per HTTP call, because every failure so far has been at the level of
+"which view, and how long before it gave up". Writes are swallowed on error: a
+log that breaks the run it records is worse than no log. `--dry-run` passes a
+`None` path, which disables it entirely rather than making callers check.
+
 **Discovery derives the dependency graph by scanning serialized item JSON** for
 the ids of other template items, rather than parsing each item type's schema.
 Web maps, dashboards, and Experience Builder apps all nest their references

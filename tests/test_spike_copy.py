@@ -68,3 +68,100 @@ class TestCopyWholeService:
         svc = FakeService(layer_ids=[0, 1], table_ids=[])
         assert copy_whole_service(svc, "ZZZ_SPIKE_TEST_abcd1234") == "copied-item"
         assert svc.call["tables"] == []
+
+
+class TestDiagnoseFailedCopy:
+    """The library creates the service, then posts the layers; when AGOL refuses
+    the layers the item is lost inside the exception. The first time this
+    happened the message named a .NET type and an empty service was left in the
+    org. The diagnosis recovers the service (so the guarded delete can run) and
+    asks AGOL layer by layer what it refused."""
+
+    def _template(self):
+        class Mgr:
+            def __init__(self, props):
+                self.properties = props
+
+        class Lyr:
+            def __init__(self, props):
+                self.manager = Mgr(props)
+
+        tmpl = type("Tmpl", (), {})()
+        tmpl.title, tmpl.itemid = "Kinetic Master FS", "8a80d371" + "0" * 24
+        tmpl.layers = [Lyr({"id": 0, "name": "Poles", "fields": []}),
+                       Lyr({"id": 1, "name": "Spans", "fields": [], "subtypes": [{"code": 1}]})]
+        tmpl.tables = [Lyr({"id": 2, "name": "Notes", "fields": []})]
+        return tmpl
+
+    def _gis(self, items):
+        class Content:
+            def search(self_, query, max_items=None):
+                return items
+
+        gis = type("GIS", (), {})()
+        gis.content = Content()
+        gis.users = type("U", (), {"me": type("Me", (), {"username": "martin"})()})()
+        return gis
+
+    def _orphan(self, spike_name, created):
+        o = type("Item", (), {})()
+        o.itemid, o.title, o.name, o.url = "orphan1", spike_name, spike_name, f"https://x/{spike_name}"
+        o.owner, o.type, o.created = "martin", "Feature Service", created
+        return o
+
+    def test_recovers_the_orphan_and_names_the_layer_and_property(self, tmp_path):
+        from agol_provision.cli import _diagnose_failed_copy
+        from agol_provision.safety import spike_service_name
+
+        spike_name = spike_service_name("8a80d371" + "0" * 24)
+        orphan = self._orphan(spike_name, created=2_000_000)
+        posted = []
+
+        def add(json_dict):
+            posted.append(json_dict)
+            for entry in json_dict.get("layers", []) + json_dict.get("tables", []):
+                if "subtypes" in entry:
+                    raise Exception("Invalid definition for LayerCoreInfo")
+            return {"success": True}
+
+        report = tmp_path / "spike.md"
+        got = _diagnose_failed_copy(
+            self._gis([orphan]), self._template(), spike_name, Exception("boom"),
+            since_ms=1_000_000, add_for=lambda item: add, report=report,
+        )
+
+        assert got is orphan
+        text = report.read_text()
+        assert "NOT USABLE" in text
+        assert "**Spans** (layer): rejected" in text
+        assert "**subtypes** were removed" in text
+        assert "- Poles (layer): accepted" in text
+        assert "- Notes (table): accepted" in text
+        # The rejected definition is in the report, so the property can be read.
+        assert '"name": "Spans"' in text
+
+    def test_returns_none_when_the_orphan_cannot_be_found(self, tmp_path, monkeypatch):
+        import agol_provision.cli as cli
+
+        monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+        got = cli._diagnose_failed_copy(
+            self._gis([]), self._template(), "ZZZ_SPIKE_TEST_8a80d371", Exception("boom"),
+            since_ms=1_000_000, add_for=lambda item: None, report=tmp_path / "spike.md",
+        )
+        assert got is None
+        assert not (tmp_path / "spike.md").exists()
+
+    def test_a_leftover_from_an_earlier_run_is_not_touched(self, tmp_path, monkeypatch):
+        """Created before this run started, so not this run's to delete --
+        even with the exact spike name."""
+        import agol_provision.cli as cli
+        from agol_provision.safety import spike_service_name
+
+        monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+        spike_name = spike_service_name("8a80d371" + "0" * 24)
+        old = self._orphan(spike_name, created=500_000)
+        got = cli._diagnose_failed_copy(
+            self._gis([old]), self._template(), spike_name, Exception("boom"),
+            since_ms=1_000_000, add_for=lambda item: None, report=tmp_path / "spike.md",
+        )
+        assert got is None

@@ -153,3 +153,72 @@ class TestFailingActuallyExits:
             assert marker not in cf_thread._threads_queues
         finally:
             cf_thread._threads_queues.pop(marker, None)
+
+
+class FakeContent:
+    def __init__(self, items):
+        self._items = items
+        self.queries = []
+
+    def search(self, query, max_items=None, **kw):
+        self.queries.append(query)
+        return list(self._items)
+
+
+class FakeGIS:
+    def __init__(self, items, username="martin"):
+        self.content = FakeContent(items)
+        self.users = type("Users", (), {"me": type("Me", (), {"username": username})()})()
+
+
+def _created(itemid, title, created, owner="martin", type_="Feature Service"):
+    item = FakeItem(itemid, title=title, name=title)
+    item.created, item.owner, item.type = created, owner, type_
+    return item
+
+
+class TestFindAbandonedSpike:
+    """`copy_feature_layer_collection()` creates the service before it posts the
+    layers, and when that post fails the item it created is lost inside the
+    exception. The finder gets it back so the spike's guarded delete can run.
+
+    It is deliberately narrow: the spike's exact name (or the `_N` the library
+    appends when the name is taken), owned by this account, created after this
+    run started. Nothing older is a candidate, however it is named."""
+
+    def _find(self, items, since_ms=1_000_000):
+        from agol_provision.safety import find_abandoned_spike
+
+        return find_abandoned_spike(FakeGIS(items), spike_service_name(MASTER), since_ms=since_ms)
+
+    def test_finds_the_service_this_run_created(self, spike_name):
+        item = _created("new", spike_name, created=1_000_500)
+        assert self._find([item]) is item
+
+    def test_accepts_the_suffix_the_library_appends_when_the_name_is_taken(self, spike_name):
+        item = _created("new", spike_name + "_2", created=1_000_500)
+        assert self._find([item]) is item
+
+    def test_ignores_a_leftover_from_an_earlier_run(self, spike_name):
+        old = _created("old", spike_name, created=999_000)
+        assert self._find([old]) is None
+
+    def test_ignores_another_service_whose_title_merely_contains_the_name(self, spike_name):
+        other = _created("x", f"Backup of {spike_name}", created=1_000_500)
+        assert self._find([other]) is None
+
+    def test_ignores_someone_elses_item(self, spike_name):
+        theirs = _created("x", spike_name, created=1_000_500, owner="someone")
+        assert self._find([theirs]) is None
+
+    def test_ignores_non_feature_services(self, spike_name):
+        view = _created("x", spike_name, created=1_000_500, type_="Web Map")
+        assert self._find([view]) is None
+
+    def test_prefers_the_newest_when_several_qualify(self, spike_name):
+        a = _created("a", spike_name, created=1_000_500)
+        b = _created("b", spike_name + "_2", created=1_000_900)
+        assert self._find([a, b]) is b
+
+    def test_none_when_nothing_matches(self):
+        assert self._find([]) is None

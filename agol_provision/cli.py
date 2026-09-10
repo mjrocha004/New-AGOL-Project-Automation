@@ -604,6 +604,77 @@ def preview(manifest_path: str | None, company: str, location: str) -> None:
 # ---------------------------------------------------------------- phase 0b
 
 
+def _diagnose_failed_copy(gis, template, spike_name, error, *, since_ms, add_for, report):
+    """A whole-service copy AGOL refused: name the layer, then the property.
+
+    Returns the service the copy created and abandoned, so the caller's guarded
+    delete can remove it, or None if it could not be found. Either way the
+    findings go to the console and the spike report, because the point of the
+    spike is to learn this before `provision` burns a real service name on it.
+    """
+    from agol_provision.layer_probe import probe
+    from agol_provision.safety import find_abandoned_spike
+
+    err.print(f"Copy failed: {error}")
+    console.print("Looking for the service the copy created before it failed...")
+    orphan = None
+    for _ in range(6):  # search indexing lags creation by a few seconds
+        orphan = find_abandoned_spike(gis, spike_name, since_ms=since_ms)
+        if orphan is not None:
+            break
+        time.sleep(5)
+    if orphan is None:
+        err.print(f"Could not find it. If a service named {spike_name} exists, it is "
+                  f"empty and safe to delete by hand.")
+        return None
+
+    console.print(f"Found {orphan.title} ({orphan.itemid}). Adding each layer alone "
+                  f"to see which AGOL refuses...")
+    results = probe(list(template.layers), list(template.tables), add_for(orphan))
+
+    t = Table(title="Layer definitions, one at a time")
+    for col in ("Name", "Kind", "Result", "Detail"):
+        t.add_column(col, overflow="fold")
+    for r in results:
+        if r.accepted:
+            note = "after the others were in" if r.retried else ""
+            t.add_row(r.name, r.kind, "[green]accepted[/green]", note)
+        else:
+            detail = r.error or ""
+            if r.culprit:
+                detail = f"accepted once its {r.culprit} were removed -- {detail}"
+            t.add_row(r.name, r.kind, "[red]rejected[/red]", detail)
+    console.print(t)
+
+    rejected = [r for r in results if not r.accepted]
+    lines = [
+        "# Phase 0b: master copy fidelity", "",
+        f"Template: {template.title} (`{template.itemid}`)", "",
+        "Method: `Item.copy_feature_layer_collection()`", "",
+        "## Verdict", "",
+        f"NOT USABLE: AGOL rejected the copied layer definitions.\n\n```\n{error}\n```", "",
+        f"## Layer by layer ({len(rejected)} rejected of {len(results)})", "",
+    ]
+    for r in results:
+        if r.accepted:
+            lines.append(f"- {r.name} ({r.kind}): accepted"
+                         + (" on retry, after the others were in" if r.retried else ""))
+        else:
+            lines.append(f"- **{r.name}** ({r.kind}): rejected -- {r.error}")
+            if r.culprit:
+                lines.append(f"  - accepted once its **{r.culprit}** were removed")
+    if rejected:
+        lines += ["", "## Rejected definitions, as posted", ""]
+        for r in rejected:
+            lines += [f"### {r.name}", "", "```json",
+                      json.dumps(r.payload, indent=2, default=str), "```", ""]
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("\n".join(lines) + "\n")
+    shown = report.relative_to(REPO_ROOT) if report.is_relative_to(REPO_ROOT) else report
+    console.print(f"\nWritten to {shown}")
+    return orphan
+
+
 @main.command("spike-master")
 @click.option("--profile", default="home", show_default=True,
               help="'home' borrows ArcGIS Pro's sign-in. Or a stored profile name.")
@@ -622,6 +693,9 @@ def spike_master(profile, master_id, keep, yes) -> None:
     from agol_provision.auth import AuthError, connect, describe
     from agol_provision.safety import refuse_delete_reason, spike_service_name
     from agol_provision.schema_diff import diff_fingerprints, fingerprint_service, summarize
+
+    def add_for(item):
+        return FeatureLayerCollection(url=item.url, gis=gis).manager.add_to_definition
 
     try:
         gis = connect(profile)
@@ -659,9 +733,21 @@ def spike_master(profile, master_id, keep, yes) -> None:
                   f"{len(source_fp['tables'])} table(s)")
 
     copy_item = None
+    started_ms = int(time.time() * 1000)
     try:
         console.print(f"Creating {spike_name}...")
-        copy_item = copy_whole_service(template, spike_name)
+        try:
+            copy_item = copy_whole_service(template, spike_name)
+        except Exception as exc:
+            # The library created the service before AGOL refused the layers,
+            # and the item went with the exception. Get it back so the delete
+            # below can run, and ask AGOL layer by layer what it objected to.
+            copy_item = _diagnose_failed_copy(
+                gis, template, spike_name, exc, since_ms=started_ms - 60_000,
+                add_for=add_for, report=REPO_ROOT / "docs" / "spike-master-copy.md",
+            )
+            _fail("The copy is NOT USABLE for this template. Fix the template, or "
+                  "the copy, before running provision against it.")
         if copy_item is None:
             _fail("copy_feature_layer_collection() returned None -- the copy failed. "
                   "Fall back to publishing from the file geodatabase.")

@@ -102,7 +102,9 @@ creating anything.
 **Every delete is guarded, and there are exactly two.** `spike-master` creates a
 temporary service and deletes it; `safety.py` refuses that delete unless the item
 carries the spike's `ZZZ_SPIKE_TEST_` prefix and is the service the copy just
-returned. `provision --destroy` deletes only ids recorded in run state, so it
+returned. When the copy raises instead of returning, `find_abandoned_spike()`
+recovers the service it created — exact spike name, this account, created after
+the run started — so the same guarded delete still runs. `provision --destroy` deletes only ids recorded in run state, so it
 cannot reach anything the tool merely found. `tests/test_safety.py` walks the
 package AST and fails if a `delete()` appears in any other function -- a third
 delete path has to be a deliberate edit to that list. An orphaned test service is
@@ -196,6 +198,17 @@ rather than an error:
   unchanged on the next run. Re-running `provision` repairs in place, so this
   needs no retry logic -- but a single unexplained index failure is worth
   re-running before investigating.
+- **`copy_feature_layer_collection()` creates the service before AGOL has
+  accepted the layers.** It calls `create_service`, then posts every layer
+  definition in one `add_to_definition`. When AGOL rejects that post (`Invalid
+  definition for ...List[LayerCoreInfo]`, a 400 that names a .NET type rather
+  than a layer) the method raises and the empty service it created is lost with
+  the exception. Inside `provision` that would burn the project's real service
+  name. `spike-master` handles it: it recovers the orphan, runs
+  `layer_probe.probe()` to post each layer alone and then with one suspect
+  property group removed at a time, and reports which layer and which property
+  AGOL refuses. First seen on the Kinetic master (19 layers, 1 table); the Zayo
+  master never triggered it.
 - **`copy_feature_layer_collection()` copies nothing by default.** It selects a
   *subset*, so called with both `layers` and `tables` left as `None` it raises
   rather than copying everything. The values it selects with are **positional

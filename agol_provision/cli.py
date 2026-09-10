@@ -502,7 +502,7 @@ def discover(profile, group, ids_file, extra_ids, query, manifest_name, out, lim
 
     snap_dir = REPO_ROOT / "snapshots"
     count = discovery.write_snapshots(inspected, snap_dir)
-    report_path = REPO_ROOT / "docs" / "discovery-report.md"
+    report_path = discovery.report_path(REPO_ROOT / "docs", manifest_name)
     discovery.write_report(gis, inspected, report_path)
 
     console.print()

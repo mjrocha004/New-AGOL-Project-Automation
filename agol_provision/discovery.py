@@ -578,6 +578,16 @@ def _safe_json(item: Item) -> Any:
     return data
 
 
+def report_path(docs_dir: Path, manifest_name: str) -> Path:
+    """Where the report for a named manifest goes.
+
+    Keyed on the manifest name for the same reason the manifest and snapshots
+    are: each template set discovered gets its own file, and discovering a
+    second set does not overwrite the first set's findings.
+    """
+    return docs_dir / f"discovery-report-{manifest_name}.md"
+
+
 def write_report(gis: GIS, inspected: list[TemplateItem], path: Path) -> None:
     """Human-readable findings, for review before committing to the build."""
     by_id = {t.item_id: t for t in inspected}

@@ -259,6 +259,15 @@ inspection.
 - **NOT USABLE** — critical structure is lost; fall back to publishing from the
   file geodatabase.
 
+If AGOL refuses the copied layer definitions outright (a 400 naming
+`LayerCoreInfo`, not a layer), the spike recovers the empty service the copy
+left behind, posts each layer to it alone to find which one AGOL rejects, then
+re-posts that layer with one likely property removed at a time to name the
+property. The report records the verdict, the layer-by-layer result, and each
+rejected definition as posted. Run it before `provision` on any new template
+set: the same copy failing inside `provision` would burn the project's real
+service name.
+
 > AGOL reserves a hosted service name permanently, even after deletion. The spike
 > reuses one fixed name so it only ever burns that one.
 
@@ -267,7 +276,9 @@ one new feature service, and its `delete()` targets that newly created item and
 nothing else. That is checked rather than assumed:
 `safety.py` refuses the delete if the item is the template, lacks the
 `ZZZ_SPIKE_TEST_` prefix, or is not the service the copy returned — leaving it in
-place instead. A leftover test service is a ten-second cleanup; a wrongly deleted
+place instead. When the copy raises partway, the service it created is found
+again only by its exact spike name, this account, and a creation time after the
+run started; anything older is left alone. A leftover test service is a ten-second cleanup; a wrongly deleted
 service is not. Pass `--keep` to skip the delete entirely.
 
 > The codebase has exactly two `delete()` calls — this one and `provision

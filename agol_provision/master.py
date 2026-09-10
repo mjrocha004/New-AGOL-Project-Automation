@@ -1,10 +1,21 @@
 """Stage 1: create the project's master feature service.
 
-The copy itself is settled -- Phase 0b returned `USABLE WITH FIXUPS` with no
-critical differences, so `copy_feature_layer_collection()` is the strategy and
-there is no publish-from-FGDB fallback. What is left is the one real loss.
+The copy is done here, in two calls, the way `copy_feature_layer_collection()`
+does it internally: `createService` with the template's service settings, then
+one `addToDefinition` carrying every layer and table. Phase 0b proved that method
+`USABLE WITH FIXUPS` with no critical differences, so there is no
+publish-from-FGDB fallback. It is ours rather than the library's for one reason:
+the library posts each layer's `relationships` verbatim, and a relationship
+names its related layer by the *template's* layer id, which AGOL renumbers on
+the way in. The Kinetic master (2 relationships) was refused outright with a
+400 that named a .NET type and no layer, and the library cannot be told to
+strip them. So the layers are posted without their relationships, and
+`reapply_relationships` puts them back with the ids remapped by layer name --
+which is exactly what Esri's own `clone_items` does. Doing it in two calls also
+keeps the item in hand before the call that can fail; the library raised with
+the service it had just created lost inside the exception.
 
-`copy_feature_layer_collection()` strips each layer's `indexes` before applying
+The copy strips each layer's `indexes` before applying
 the definition, so even a perfect copy arrives without them. The spike reported
 83 missing index entries across 18 layers, of which 73 are system-generated names
 that could never have matched -- SQL Server primary keys with random suffixes,
@@ -13,7 +24,7 @@ on creation, and GlobalID indexes recreated with the field. Ten are real:
 `build_status_Index` on 9 layers and `I25bore_depth` on 1.
 
 The first live run confirmed the renumbering rather than merely predicting it.
-`copy_feature_layer_collection()` deletes `indexes` from every layer definition
+The copy deletes `indexes` from every layer definition
 before posting it, and this module drops every single-system-field index, so the
 creation request carried *no* GlobalID or editor-tracking index at all -- yet the
 copy has them, under names without the template's `I25` prefix. ArcGIS Online
@@ -32,6 +43,7 @@ direction.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +54,26 @@ _DUPLICATE_MARKERS = ("duplicate", "already exists", "already in use")
 APPLIED = "applied"
 ALREADY_PRESENT = "already present"
 FAILED = "failed"
+
+# What `copy_feature_layer_collection()` carries from the template's service
+# properties into `createService`. Its list, verbatim, so the service is created
+# exactly as the copy the spike verified created it. Everything else on the
+# service (`serviceItemId`, `layers`, the org's own metadata) AGOL sets itself.
+SERVICE_PARAMS = (
+    "description", "allowGeometryUpdates", "units", "syncEnabled",
+    "serviceDescription", "capabilities", "serviceItemId",
+    "supportsDisconnectedEditing", "maxRecordCount", "supportsApplyEditsWithGlobalIds",
+    "name", "supportedQueryFormats", "xssPreventionInfo", "copyrightText",
+    "currentVersion", "syncCapabilities", "_ssl", "hasStaticData", "hasVersionedData",
+    "editorTrackingInfo",
+)
+
+# Dropped from every layer definition before it is posted. The first two are
+# what the library drops. `relationships` is why the copy is ours: a
+# relationship names its related layer by the template's layer *id*, and AGOL
+# renumbers layers on the way in, so posted as-is the whole definition is
+# refused. `reapply_relationships` puts them back with the ids remapped.
+LAYER_STRIPS = ("indexes", "adminLayerInfo", "relationships")
 
 
 class MasterError(RuntimeError):
@@ -150,6 +182,148 @@ def user_defined_indexes(layer_properties: Any) -> list[dict]:
     ]
 
 
+# ---------------------------------------------------------------- the copy
+
+
+def service_params(template_properties: Any, service_name: str) -> dict[str, Any]:
+    """`createService` parameters for the new master, as the library builds them."""
+    params = {k: v for k, v in dict(template_properties).items() if k in SERVICE_PARAMS}
+    params["name"] = service_name
+    params["_ssl"] = False
+    return params
+
+
+def layer_definitions(template_flc: Any) -> dict[str, list[dict[str, Any]]]:
+    """Every layer and table of the template, in order, ready to post.
+
+    Deep-copied, so stripping never touches the template."""
+    defs: dict[str, list[dict[str, Any]]] = {"layers": [], "tables": []}
+    for kind, items in (("layers", template_flc.layers), ("tables", template_flc.tables)):
+        for lyr in items:
+            payload = copy.deepcopy(dict(lyr.manager.properties))
+            for key in LAYER_STRIPS:
+                payload.pop(key, None)
+            defs[kind].append(payload)
+    return defs
+
+
+def create_empty_service(
+    gis: Any, template_flc: Any, service_name: str, *,
+    title: str, description: str = "", snippet: str = "", tags: Any = (),
+) -> Any:
+    """Create the new service with the template's settings and no layers yet.
+
+    Separate from posting the layers so the item is in hand before the call
+    that can fail. The library does both in one method and, when the second
+    step fails, raises with the item it created lost inside the exception.
+    """
+    item = gis.content.create_service(
+        name=service_name,
+        create_params=service_params(template_flc.properties, service_name),
+        item_properties={
+            "title": title, "description": description, "snippet": snippet,
+            "tags": list(tags),
+        },
+    )
+    if item is None:
+        raise MasterError(
+            f"create_service() returned None for {service_name}. Nothing was created."
+        )
+    return item
+
+
+def add_layer_definitions(template_flc: Any, new_flc: Any) -> dict[str, list[dict[str, Any]]]:
+    """Post the template's layers and tables to the new service, in one call.
+
+    Returns what was posted. AGOL's refusal is re-raised as a `MasterError`
+    carrying its message; the service exists either way.
+    """
+    defs = layer_definitions(template_flc)
+    try:
+        new_flc.manager.add_to_definition(defs)
+    except Exception as exc:
+        raise MasterError(" ".join(str(exc).split())) from exc
+    return defs
+
+
+@dataclass(frozen=True)
+class RelationshipOutcome:
+    """What happened to one relationship on one layer."""
+
+    layer: str
+    relationship: str
+    status: str
+    detail: str = ""
+
+
+def reapply_relationships(template_flc: Any, new_flc: Any) -> list[RelationshipOutcome]:
+    """Put the template's relationships on the copy, with the layer ids remapped.
+
+    Layers are matched by *name*, which the copy preserves; ids are not. This is
+    the same operation `clone_items` performs after it has created a service:
+    one service-level `addToDefinition` whose `layers` carry only an `id` and the
+    `relationships` to add. Relationships the copy already has are skipped, so a
+    re-run repairs rather than duplicates.
+    """
+    template = list(template_flc.layers) + list(template_flc.tables)
+    new = list(new_flc.layers) + list(new_flc.tables)
+    template_name_by_id = {l.properties.get("id"): str(l.properties.get("name")) for l in template}
+    new_by_name = {str(l.properties.get("name")): l for l in new}
+
+    outcomes: list[RelationshipOutcome] = []
+    pending: list[tuple[str, str]] = []
+    to_post: dict[Any, list[dict[str, Any]]] = {}
+
+    for t in template:
+        wanted = list(t.properties.get("relationships", []) or [])
+        if not wanted:
+            continue
+        name = template_name_by_id[t.properties.get("id")]
+        target = new_by_name.get(name)
+        if target is None:
+            outcomes += [
+                RelationshipOutcome(name, str(r.get("name")), FAILED,
+                                    f"layer {name!r} is not in the copy")
+                for r in wanted
+            ]
+            continue
+        existing = {
+            (str(r.get("name")), str(r.get("role")))
+            for r in (target.properties.get("relationships", []) or [])
+        }
+        for r in wanted:
+            rel_name = str(r.get("name"))
+            if (rel_name, str(r.get("role"))) in existing:
+                outcomes.append(RelationshipOutcome(name, rel_name, ALREADY_PRESENT))
+                continue
+            related_name = template_name_by_id.get(r.get("relatedTableId"))
+            related = new_by_name.get(related_name) if related_name else None
+            if related is None:
+                outcomes.append(RelationshipOutcome(
+                    name, rel_name, FAILED,
+                    f"its related layer {related_name!r} (template id "
+                    f"{r.get('relatedTableId')}) is not in the copy",
+                ))
+                continue
+            remapped = dict(r, relatedTableId=related.properties.get("id"))
+            to_post.setdefault(target.properties.get("id"), []).append(remapped)
+            pending.append((name, rel_name))
+
+    if to_post:
+        payload = {"layers": [{"id": i, "relationships": rels} for i, rels in to_post.items()]}
+        try:
+            new_flc.manager.add_to_definition(payload)
+        except Exception as exc:
+            status, detail = _classify_failure(exc)
+            outcomes += [RelationshipOutcome(l, r, status, detail) for l, r in pending]
+        else:
+            outcomes += [RelationshipOutcome(l, r, APPLIED) for l, r in pending]
+    return outcomes
+
+
+# ---------------------------------------------------------------- indexes
+
+
 def reapply_user_indexes(template_flc: Any, new_flc: Any) -> list[IndexOutcome]:
     """Put the template's user-defined indexes back on the copy."""
     return _reapply(template_flc, new_flc, lambda tpl, _new: user_defined_indexes(tpl))
@@ -176,9 +350,9 @@ def reapply_missing_coverage(template_flc: Any, new_flc: Any) -> list[IndexOutco
 def _reapply(template_flc: Any, new_flc: Any, select: Any) -> list[IndexOutcome]:
     """Apply the indexes `select` picks, layer by layer.
 
-    Layers are paired by position, which is how the copy was made --
-    `copy_feature_layer_collection()` selects by positional index into
-    `Item.layers`. That correspondence is *checked* rather than assumed: applying
+    Layers are paired by position, which is how the copy was made -- the
+    definitions are posted in template order and AGOL numbers them in that
+    order. That correspondence is *checked* rather than assumed: applying
     an index to the wrong layer would be a silent wrong answer, so a mismatch
     refuses the whole operation instead of guessing.
     """

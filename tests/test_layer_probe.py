@@ -45,13 +45,16 @@ def _layer(layer_id, name, **extra):
 
 
 class TestPayload:
-    def test_strips_what_the_library_strips(self):
-        """The copy drops `indexes` and `adminLayerInfo` before posting, so the
-        probe must post the same thing or it tests a different payload."""
-        lyr = _layer(0, "Poles", indexes=[{"name": "i"}], adminLayerInfo={"x": 1})
+    def test_strips_what_the_copy_strips(self):
+        """The copy drops `indexes`, `adminLayerInfo` and `relationships` before
+        posting, so the probe must post the same thing or it tests a different
+        payload from the one that failed."""
+        lyr = _layer(0, "Poles", indexes=[{"name": "i"}], adminLayerInfo={"x": 1},
+                     relationships=[{"relatedTableId": 20}])
         payload = layer_payload(lyr)
         assert "indexes" not in payload
         assert "adminLayerInfo" not in payload
+        assert "relationships" not in payload
         assert payload["name"] == "Poles"
 
     def test_does_not_mutate_the_source(self):
@@ -82,16 +85,16 @@ class TestProbe:
         assert by_name["Spans"].error == "Invalid definition"
 
     def test_a_forward_reference_is_retried_once_its_target_is_in(self):
-        """A layer whose relationship points at a table not yet added may be
-        refused for that reason alone. Retrying after everything else is in
-        separates 'ordering' from 'this definition is bad'."""
+        """A definition that refers to a layer not yet added may be refused for
+        that reason alone. Retrying after everything else is in separates
+        'ordering' from 'this definition is bad'."""
         def reject(payload, present):
-            for rel in payload.get("relationships", []):
-                if rel["relatedTableId"] not in present:
-                    return f"related table {rel['relatedTableId']} missing"
+            needs = payload.get("dependsOnLayer")
+            if needs is not None and needs not in present:
+                return f"layer {needs} missing"
             return None
 
-        poles = _layer(0, "Poles", relationships=[{"relatedTableId": 5}])
+        poles = _layer(0, "Poles", dependsOnLayer=5)
         notes = _layer(5, "Notes")
         results = probe([poles], [notes], FakeTarget(reject).add_to_definition)
         assert all(r.accepted for r in results)

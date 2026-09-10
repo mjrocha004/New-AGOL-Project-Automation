@@ -783,10 +783,11 @@ class TestProvisionStage2:
             for line in (state_dir / "companya-moline.log").read_text().splitlines()
         ]
         text = (state_dir / "companya-moline.log").read_text()
-        for expected in ("provision", "preflight", "master.copy", "master.indexes",
+        for expected in ("provision", "preflight", "master.create", "master.layers",
+                         "master.relationships", "master.indexes",
                          "views.create", "views.wait", "views.queries", "done"):
             assert expected in text, f"{expected} missing from the log"
-        assert text.index("master.copy") < text.index("views.create")
+        assert text.index("master.create") < text.index("master.layers") < text.index("views.create")
         assert "ms  " in text  # every step carries a duration
         assert labels  # and every line parses
 

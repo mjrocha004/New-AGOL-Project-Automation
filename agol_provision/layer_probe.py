@@ -1,10 +1,11 @@
-"""Find out which layer AGOL refuses when a whole-service copy fails.
+"""Find out which layer AGOL refuses when the copy's layer post fails.
 
-`copy_feature_layer_collection()` posts every layer definition in one
-`addToDefinition` call, and when AGOL rejects it the message names a .NET type
-(`Invalid definition for List[LayerCoreInfo]`), not a layer or a property. The
-first template this happened on had 19 layers and a table, any of which could
-have been the one.
+The copy posts every layer definition in one `addToDefinition` call, and when
+AGOL rejects it the message names a .NET type (`Invalid definition for
+List[LayerCoreInfo]`), not a layer or a property. The first template this
+happened on had 19 layers and a table, any of which could have been the one.
+It was the two with relationships -- found by exactly this probe -- and the
+copy now strips those before posting. The probe stays for the next thing.
 
 The probe gets AGOL to say which. It posts each definition alone, in template
 order, so each answer is about one layer. A rejected layer is retried after the
@@ -14,8 +15,8 @@ refused is posted again with one suspect group removed at a time -- the first
 version AGOL accepts names the property. Every post is atomic on AGOL's side, so
 a refused attempt leaves nothing behind and no layer is ever removed.
 
-The payload is built the way the library builds it (`indexes` and
-`adminLayerInfo` dropped), so the probe tests what the copy actually sends.
+The payload is built the way `master.layer_definitions` builds it, so the probe
+tests what the copy actually sent.
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from agol_provision.master import LAYER_STRIPS
+
 Adder = Callable[[dict[str, Any]], Any]
 
-# Dropped before posting, exactly as copy_feature_layer_collection() does.
-_LIBRARY_STRIPS = ("indexes", "adminLayerInfo")
-
 # Tried one at a time on a layer AGOL keeps refusing, most likely first. Each
-# entry is (label, top-level keys to drop, per-field keys to drop).
+# entry is (label, top-level keys to drop, per-field keys to drop). Anything the
+# copy already strips is a no-op here and skipped.
 SUSPECTS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("relationships", ("relationships",), ()),
     ("subtypes", ("subtypes", "subtypeField", "defaultSubtypeCode"), ()),
@@ -54,10 +55,10 @@ class ProbeResult:
 
 
 def layer_payload(layer: Any) -> dict[str, Any]:
-    """The definition the copy would post for this layer: a deep copy, so the
+    """The definition the copy posts for this layer: a deep copy, so the
     stripping never touches the template."""
     payload = copy.deepcopy(dict(layer.manager.properties))
-    for key in _LIBRARY_STRIPS:
+    for key in LAYER_STRIPS:
         payload.pop(key, None)
     return payload
 

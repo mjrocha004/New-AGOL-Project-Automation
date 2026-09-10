@@ -60,26 +60,6 @@ def _release_polling_threads() -> None:
         pass  # private API; if it moves, the worst case is the old hang
 
 
-def copy_whole_service(template: Any, service_name: str) -> Any:
-    """Copy every layer and table of a feature service into a new one.
-
-    `copy_feature_layer_collection()` selects a *subset*, and its defaults are not
-    "everything" -- with both `layers` and `tables` left as None it raises. The
-    values it selects with are positional indexes into `Item.layers` /
-    `Item.tables` (it evaluates `self.layers[idx]`), not layer ids, so a master
-    whose layer ids start at 11 needs 0..n-1 here.
-
-    Note that the copy drops each layer's `indexes` before applying the
-    definition, so the spike is expected to report index differences. That is a
-    property of this method, not of the template.
-    """
-    return template.copy_feature_layer_collection(
-        service_name=service_name,
-        layers=list(range(len(template.layers))),
-        tables=list(range(len(template.tables))),
-    )
-
-
 @click.group()
 @click.version_option(__version__)
 def main() -> None:
@@ -604,33 +584,19 @@ def preview(manifest_path: str | None, company: str, location: str) -> None:
 # ---------------------------------------------------------------- phase 0b
 
 
-def _diagnose_failed_copy(gis, template, spike_name, error, *, since_ms, add_for, report):
-    """A whole-service copy AGOL refused: name the layer, then the property.
+def _diagnose_failed_copy(service, template_flc, error, *, add, report):
+    """AGOL refused the layer definitions: name the layer, then the property.
 
-    Returns the service the copy created and abandoned, so the caller's guarded
-    delete can remove it, or None if it could not be found. Either way the
-    findings go to the console and the spike report, because the point of the
-    spike is to learn this before `provision` burns a real service name on it.
+    The findings go to the console and the spike report, because the point of
+    the spike is to learn this before `provision` burns a real service name on
+    it. `service` is the empty service the layers were meant for; the caller
+    still owns deleting it.
     """
     from agol_provision.layer_probe import probe
-    from agol_provision.safety import find_abandoned_spike
 
     err.print(f"Copy failed: {error}")
-    console.print("Looking for the service the copy created before it failed...")
-    orphan = None
-    for _ in range(6):  # search indexing lags creation by a few seconds
-        orphan = find_abandoned_spike(gis, spike_name, since_ms=since_ms)
-        if orphan is not None:
-            break
-        time.sleep(5)
-    if orphan is None:
-        err.print(f"Could not find it. If a service named {spike_name} exists, it is "
-                  f"empty and safe to delete by hand.")
-        return None
-
-    console.print(f"Found {orphan.title} ({orphan.itemid}). Adding each layer alone "
-                  f"to see which AGOL refuses...")
-    results = probe(list(template.layers), list(template.tables), add_for(orphan))
+    console.print("Adding each layer alone to see which AGOL refuses...")
+    results = probe(list(template_flc.layers), list(template_flc.tables), add)
 
     t = Table(title="Layer definitions, one at a time")
     for col in ("Name", "Kind", "Result", "Detail"):
@@ -647,10 +613,11 @@ def _diagnose_failed_copy(gis, template, spike_name, error, *, since_ms, add_for
     console.print(t)
 
     rejected = [r for r in results if not r.accepted]
+    title = getattr(template_flc, "properties", {}).get("name", "?")
     lines = [
         "# Phase 0b: master copy fidelity", "",
-        f"Template: {template.title} (`{template.itemid}`)", "",
-        "Method: `Item.copy_feature_layer_collection()`", "",
+        f"Template service: {title}", "",
+        "Method: create the service, post the layer definitions (master.py)", "",
         "## Verdict", "",
         f"NOT USABLE: AGOL rejected the copied layer definitions.\n\n```\n{error}\n```", "",
         f"## Layer by layer ({len(rejected)} rejected of {len(results)})", "",
@@ -672,7 +639,6 @@ def _diagnose_failed_copy(gis, template, spike_name, error, *, since_ms, add_for
     report.write_text("\n".join(lines) + "\n")
     shown = report.relative_to(REPO_ROOT) if report.is_relative_to(REPO_ROOT) else report
     console.print(f"\nWritten to {shown}")
-    return orphan
 
 
 @main.command("spike-master")
@@ -691,11 +657,14 @@ def spike_master(profile, master_id, keep, yes) -> None:
     from arcgis.features import FeatureLayerCollection
 
     from agol_provision.auth import AuthError, connect, describe
-    from agol_provision.safety import refuse_delete_reason, spike_service_name
+    from agol_provision.master import (
+        MasterError,
+        add_layer_definitions,
+        create_empty_service,
+        reapply_relationships,
+    )
+    from agol_provision.safety import free_spike_name, refuse_delete_reason
     from agol_provision.schema_diff import diff_fingerprints, fingerprint_service, summarize
-
-    def add_for(item):
-        return FeatureLayerCollection(url=item.url, gis=gis).manager.add_to_definition
 
     try:
         gis = connect(profile)
@@ -708,7 +677,7 @@ def spike_master(profile, master_id, keep, yes) -> None:
     if template.type != "Feature Service":
         _fail(f"{template.title!r} is a {template.type}, not a Feature Service.")
 
-    spike_name = spike_service_name(master_id)
+    spike_name = free_spike_name(gis, master_id)
 
     console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
     console.print(f"Template: [cyan]{template.title}[/cyan] ({master_id})")
@@ -723,36 +692,56 @@ def spike_master(profile, master_id, keep, yes) -> None:
                   "created in step 1, and is refused if that item is not what step 1 "
                   "returned.[/dim]")
     console.print()
-    console.print("[dim]Note: AGOL reserves a service name permanently, even after "
-                  "deletion. This name is used every run so it only ever burns one.[/dim]")
+    console.print("[dim]Note: AGOL reserves a hosted service name permanently, even "
+                  "after deletion, so each run takes the next free name in this "
+                  "series.[/dim]")
     if not yes:
         click.confirm("Proceed?", abort=True)
 
-    source_fp = fingerprint_service(FeatureLayerCollection.fromitem(template))
+    template_flc = FeatureLayerCollection.fromitem(template)
+    source_fp = fingerprint_service(template_flc)
     console.print(f"Template schema: {len(source_fp['layers'])} layer(s), "
                   f"{len(source_fp['tables'])} table(s)")
 
+    def fresh_copy():
+        # `.layers` is snapshotted at construction, so anything that must see
+        # layers added a moment ago needs a new collection.
+        return FeatureLayerCollection(url=copy_item.url, gis=gis)
+
     copy_item = None
-    started_ms = int(time.time() * 1000)
     try:
         console.print(f"Creating {spike_name}...")
         try:
-            copy_item = copy_whole_service(template, spike_name)
-        except Exception as exc:
-            # The library created the service before AGOL refused the layers,
-            # and the item went with the exception. Get it back so the delete
-            # below can run, and ask AGOL layer by layer what it objected to.
-            copy_item = _diagnose_failed_copy(
-                gis, template, spike_name, exc, since_ms=started_ms - 60_000,
-                add_for=add_for, report=REPO_ROOT / "docs" / "spike-master-copy.md",
+            copy_item = create_empty_service(
+                gis, template_flc, spike_name, title=spike_name,
+                description=template.description or "", snippet=template.snippet or "",
+                tags=template.tags or [],
+            )
+        except MasterError as exc:
+            _fail(str(exc))
+
+        console.print(f"Posting {len(source_fp['layers'])} layer(s) and "
+                      f"{len(source_fp['tables'])} table(s)...")
+        try:
+            add_layer_definitions(template_flc, fresh_copy())
+        except MasterError as exc:
+            # The service exists and is in hand, so the delete below still runs.
+            # Before it does, ask AGOL layer by layer what it objected to.
+            _diagnose_failed_copy(
+                copy_item, template_flc, exc, add=fresh_copy().manager.add_to_definition,
+                report=REPO_ROOT / "docs" / "spike-master-copy.md",
             )
             _fail("The copy is NOT USABLE for this template. Fix the template, or "
                   "the copy, before running provision against it.")
-        if copy_item is None:
-            _fail("copy_feature_layer_collection() returned None -- the copy failed. "
-                  "Fall back to publishing from the file geodatabase.")
 
-        copy_fp = fingerprint_service(FeatureLayerCollection.fromitem(copy_item))
+        # The same fixup provision applies, so the diff below verifies it: a
+        # relationship missing from the copy is rated critical.
+        relationships = reapply_relationships(template_flc, fresh_copy())
+        if relationships:
+            _summarise("Relationships", relationships, "relationship",
+                       lambda o: o.relationship)
+
+        copy_fp = fingerprint_service(fresh_copy())
         diffs = diff_fingerprints(source_fp, copy_fp)
 
         console.print()
@@ -780,7 +769,8 @@ def spike_master(profile, master_id, keep, yes) -> None:
         report.write_text(
             "# Phase 0b: master copy fidelity\n\n"
             f"Template: {template.title} (`{master_id}`)\n\n"
-            f"Method: `Item.copy_feature_layer_collection()`\n\n"
+            f"Method: create the service, post the layer definitions, reapply "
+            f"relationships (master.py)\n\n"
             f"## Verdict\n\n{verdict}\n\n"
             f"## Differences ({len(diffs)})\n\n"
             + ("\n".join(f"- {d}" for d in diffs) if diffs else "None.\n")
@@ -808,7 +798,7 @@ def spike_master(profile, master_id, keep, yes) -> None:
             else:
                 try:
                     copy_item.delete()
-                    console.print(f"[dim]Deleted {spike_name}.[/dim]")
+                    console.print(f"[dim]Deleted {copy_item.title}.[/dim]")
                 except Exception as exc:
                     err.print(f"Could not delete {spike_name}: {exc}\nDelete it by hand.")
         elif copy_item is not None:
@@ -1111,20 +1101,32 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> N
                   f"`provision --destroy {state.slug}` to clear the record, then "
                   f"re-run with a service name that is still free.")
         console.print(f"[dim]Already created as {existing.item_id}; "
-                      f"rechecking indexes.[/dim]")
+                      f"rechecking relationships and indexes.[/dim]")
         _reapply_and_report(template, already, log)
         return
 
+    from agol_provision.master import MasterError, add_layer_definitions, create_empty_service
+    from agol_provision.views import service_of
+
     console.print(f"Copying [cyan]{template.title}[/cyan] to [cyan]{service_name}[/cyan] "
                   f"({len(template.layers)} layer(s), {len(template.tables)} table(s))...")
-    with log.step("master.copy", service_name) as note:
-        copy_item = copy_whole_service(template, service_name)
-        note.detail = (f"{service_name}  {len(template.layers)} layer(s), "
-                       f"{len(template.tables)} table(s)")
-    if copy_item is None:
-        _fail(f"copy_feature_layer_collection() returned None -- the copy failed. "
-              f"Nothing was recorded, so check the org for a partial service named "
-              f"{service_name} before re-running.")
+    # The copy is done in two calls rather than the library's one, so the item is
+    # in hand before the call that can fail: create the empty service, record it,
+    # then post the layers. See master.py for why the library's copy cannot be
+    # used on a master with relationships.
+    template_flc = service_of(template)
+    with log.step("master.create", service_name):
+        try:
+            copy_item = create_empty_service(
+                gis, template_flc, service_name, title=title,
+                description=(
+                    f"Master feature service for {ctx.company} {ctx.location}, "
+                    f"provisioned from template {template.title} ({spec.template_item_id})."
+                ),
+                tags=[ctx.company, ctx.location],
+            )
+        except MasterError as exc:
+            _fail(str(exc))
 
     # Recorded before anything else can fail. An item that exists in AGOL but not
     # in state is the one failure mode that leaks an orphan.
@@ -1132,39 +1134,46 @@ def _create_master(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> N
         key=spec.key, item_id=copy_item.itemid, item_type="Feature Service",
         title=title, service_name=service_name,
     ))
-    console.print(f"[green]Created[/green] {service_name} ({copy_item.itemid})")
+    console.print(f"[green]Created[/green] {service_name} ({copy_item.itemid}) "
+                  f"as [cyan]{title}[/cyan]")
 
-    # The copy names the item after the *service*, so without this the master's
-    # item title reads "CompanyA_Moline" rather than "CompanyA Moline".
-    copy_item.update(item_properties={
-        "title": title,
-        "description": (
-            f"Master feature service for {ctx.company} {ctx.location}, provisioned "
-            f"from template {template.title} ({spec.template_item_id})."
-        ),
-        "tags": [ctx.company, ctx.location],
-    })
-    console.print(f"Item title set to [cyan]{title}[/cyan]")
+    with log.step("master.layers", service_name) as note:
+        try:
+            posted = add_layer_definitions(template_flc, service_of(copy_item))
+        except MasterError as exc:
+            _fail(f"AGOL refused the layer definitions: {exc}\n\n{service_name} exists "
+                  f"with no layers and is recorded -- `provision --destroy {state.slug}` "
+                  f"removes it. Its name is burned, so the next attempt needs "
+                  f"--service-name-override. Run spike-master against this template "
+                  f"to find which layer AGOL rejects.")
+        note.detail = f"{len(posted['layers'])} layer(s), {len(posted['tables'])} table(s)"
+    console.print(f"Posted {len(posted['layers'])} layer(s) and {len(posted['tables'])} table(s)")
 
     _reapply_and_report(template, copy_item, log)
 
 
 def _reapply_and_report(template: Any, service: Any, log: Any) -> None:
-    """Put the template's user-defined indexes back, and say what happened.
+    """Put back what the copy could not carry, and say what happened.
 
-    The copy strips every index, so the ten user-defined ones go back by hand.
+    Relationships first: the copy posts the layers without them, because they
+    name the related layer by an id AGOL renumbers. Then the indexes: the copy
+    strips every one, so the ten user-defined ones go back by hand.
     `build_status_Index` is the one that matters: `build_status` is the field
     every view's definition query filters on.
     """
-    from collections import defaultdict
-
     from agol_provision.master import (
+        FAILED,
         MasterError,
         reapply_missing_coverage,
+        reapply_relationships,
         reapply_user_indexes,
     )
+    from agol_provision.views import service_of
 
     try:
+        with log.step("master.relationships") as note:
+            relationships = reapply_relationships(template, service_of(service))
+            note.detail = _index_tally(relationships)
         with log.step("master.indexes") as note:
             outcomes = reapply_user_indexes(template, service)
             note.detail = _index_tally(outcomes)
@@ -1179,12 +1188,19 @@ def _reapply_and_report(template: Any, service: Any, log: Any) -> None:
                   f"recorded. Fix the cause and re-run to reapply them.")
         return
 
+    if relationships:
+        _summarise("Relationships", relationships, "relationship",
+                   lambda o: o.relationship)
+        if any(o.status == FAILED for o in relationships):
+            err.print("A missing relationship breaks related-record editing in "
+                      "every map and app that uses it. Re-run to retry; if it "
+                      "fails again, the report above carries AGOL's reason.")
     if not outcomes:
         console.print("[dim]No user-defined indexes to reapply.[/dim]")
     else:
-        _summarise_indexes("Indexes", outcomes)
+        _summarise("Indexes", outcomes, "index", lambda o: o.index)
     if coverage:
-        _summarise_indexes("Indexes AGOL did not recreate", coverage)
+        _summarise("Indexes AGOL did not recreate", coverage, "index", lambda o: o.index)
     _report_schema_gaps(template, service)
 
 
@@ -1197,7 +1213,7 @@ def _index_tally(outcomes: list[Any]) -> str:
     return f"{applied} applied, {len(outcomes) - applied - failed} present, {failed} failed"
 
 
-def _summarise_indexes(label: str, outcomes: list[Any]) -> None:
+def _summarise(label: str, outcomes: list[Any], noun: str, name_of: Any) -> None:
     """One line per pass, and failures grouped by AGOL's message.
 
     Grouped because AGOL repeats the same rejection once per index, and one copy
@@ -1217,11 +1233,11 @@ def _summarise_indexes(label: str, outcomes: list[Any]) -> None:
 
     grouped: dict[str, list[str]] = defaultdict(list)
     for outcome in failed:
-        grouped[outcome.detail].append(f"{outcome.index} on {outcome.layer}")
+        grouped[outcome.detail].append(f"{name_of(outcome)} on {outcome.layer}")
     for detail, where in grouped.items():
-        err.print(f"  {len(where)} index(es) failed: {detail}")
+        err.print(f"  {len(where)} {noun}(es) failed: {detail}")
         err.print(f"    [dim]{', '.join(where)}[/dim]")
-    if failed:
+    if failed and noun == "index":
         err.print("The master exists and is recorded. A missing index is a "
                   "performance problem, not a correctness one -- every view's "
                   "definition query still works.")

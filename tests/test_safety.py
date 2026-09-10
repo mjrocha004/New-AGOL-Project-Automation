@@ -156,69 +156,39 @@ class TestFailingActuallyExits:
 
 
 class FakeContent:
-    def __init__(self, items):
-        self._items = items
+    def __init__(self, taken=()):
+        self._taken = set(taken)
         self.queries = []
 
-    def search(self, query, max_items=None, **kw):
-        self.queries.append(query)
-        return list(self._items)
+    def is_service_name_available(self, service_name, service_type):
+        self.queries.append(service_name)
+        return service_name not in self._taken
 
 
-class FakeGIS:
-    def __init__(self, items, username="martin"):
-        self.content = FakeContent(items)
-        self.users = type("Users", (), {"me": type("Me", (), {"username": username})()})()
+class TestFreeSpikeName:
+    """AGOL reserves a hosted service name permanently. The second run against
+    the Kinetic master got `_2` from the library; now the suffix is ours, so
+    the delete guard's prefix match and the name the run creates agree."""
 
+    def _gis(self, taken=()):
+        return type("GIS", (), {"content": FakeContent(taken)})()
 
-def _created(itemid, title, created, owner="martin", type_="Feature Service"):
-    item = FakeItem(itemid, title=title, name=title)
-    item.created, item.owner, item.type = created, owner, type_
-    return item
+    def test_the_series_name_when_it_is_free(self, spike_name):
+        from agol_provision.safety import free_spike_name
 
+        assert free_spike_name(self._gis(), MASTER) == spike_name
 
-class TestFindAbandonedSpike:
-    """`copy_feature_layer_collection()` creates the service before it posts the
-    layers, and when that post fails the item it created is lost inside the
-    exception. The finder gets it back so the spike's guarded delete can run.
+    def test_the_first_free_suffix_when_it_is_not(self, spike_name):
+        from agol_provision.safety import free_spike_name
 
-    It is deliberately narrow: the spike's exact name (or the `_N` the library
-    appends when the name is taken), owned by this account, created after this
-    run started. Nothing older is a candidate, however it is named."""
+        gis = self._gis(taken=[spike_name, spike_name + "_2"])
+        assert free_spike_name(gis, MASTER) == spike_name + "_3"
 
-    def _find(self, items, since_ms=1_000_000):
-        from agol_provision.safety import find_abandoned_spike
+    def test_every_name_in_the_series_passes_the_delete_guard(self, spike_name):
+        """The guard matches the series name as a substring, so a suffixed
+        service is still recognised as the spike's own."""
+        from agol_provision.safety import free_spike_name
 
-        return find_abandoned_spike(FakeGIS(items), spike_service_name(MASTER), since_ms=since_ms)
-
-    def test_finds_the_service_this_run_created(self, spike_name):
-        item = _created("new", spike_name, created=1_000_500)
-        assert self._find([item]) is item
-
-    def test_accepts_the_suffix_the_library_appends_when_the_name_is_taken(self, spike_name):
-        item = _created("new", spike_name + "_2", created=1_000_500)
-        assert self._find([item]) is item
-
-    def test_ignores_a_leftover_from_an_earlier_run(self, spike_name):
-        old = _created("old", spike_name, created=999_000)
-        assert self._find([old]) is None
-
-    def test_ignores_another_service_whose_title_merely_contains_the_name(self, spike_name):
-        other = _created("x", f"Backup of {spike_name}", created=1_000_500)
-        assert self._find([other]) is None
-
-    def test_ignores_someone_elses_item(self, spike_name):
-        theirs = _created("x", spike_name, created=1_000_500, owner="someone")
-        assert self._find([theirs]) is None
-
-    def test_ignores_non_feature_services(self, spike_name):
-        view = _created("x", spike_name, created=1_000_500, type_="Web Map")
-        assert self._find([view]) is None
-
-    def test_prefers_the_newest_when_several_qualify(self, spike_name):
-        a = _created("a", spike_name, created=1_000_500)
-        b = _created("b", spike_name + "_2", created=1_000_900)
-        assert self._find([a, b]) is b
-
-    def test_none_when_nothing_matches(self):
-        assert self._find([]) is None
+        name = free_spike_name(self._gis(taken=[spike_name]), MASTER)
+        item = FakeItem("new", title=name, name=name)
+        assert refuse_delete_reason(item, template_id=MASTER, expected_name=spike_name) is None

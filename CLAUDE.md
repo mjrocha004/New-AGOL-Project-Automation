@@ -16,9 +16,11 @@ Phase 0 (discovery + master-copy spike) and the core modules are built.
 `docs/implementation-plan.md` holds the phased plan and the reasoning.
 
 **Phase 2 stages 0-2 are done** — `preflight.py` resolves the templates, renders every name, and
-hard-fails on a taken service name; `master.py` copies the template master and
-reapplies the user-defined indexes the copy drops, classified by *fields* rather
-than by name. `provision --destroy` rolls a project back from run state.
+hard-fails on a taken service name; `master.py` copies the template master
+(`createService` + one `addToDefinition`, done by hand rather than through
+`copy_feature_layer_collection()` — see below), reapplies its relationships with
+the layer ids remapped, and reapplies the user-defined indexes the copy drops,
+classified by *fields* rather than by name. `provision --destroy` rolls a project back from run state.
 `views.py` creates each view natively from the new master, replaying the
 template's capabilities, layer subset and per-layer definition queries read live
 at provision time. **Stages 0-2 are complete and verified against the real org**
@@ -101,10 +103,9 @@ creating anything.
 
 **Every delete is guarded, and there are exactly two.** `spike-master` creates a
 temporary service and deletes it; `safety.py` refuses that delete unless the item
-carries the spike's `ZZZ_SPIKE_TEST_` prefix and is the service the copy just
-returned. When the copy raises instead of returning, `find_abandoned_spike()`
-recovers the service it created — exact spike name, this account, created after
-the run started — so the same guarded delete still runs. `provision --destroy` deletes only ids recorded in run state, so it
+carries the spike's `ZZZ_SPIKE_TEST_` prefix and is the service this run
+created. The copy is two calls precisely so the item is in hand before the one
+that can fail. `provision --destroy` deletes only ids recorded in run state, so it
 cannot reach anything the tool merely found. `tests/test_safety.py` walks the
 package AST and fails if a `delete()` appears in any other function -- a third
 delete path has to be a deliberate edit to that list. An orphaned test service is
@@ -198,28 +199,27 @@ rather than an error:
   unchanged on the next run. Re-running `provision` repairs in place, so this
   needs no retry logic -- but a single unexplained index failure is worth
   re-running before investigating.
-- **`copy_feature_layer_collection()` creates the service before AGOL has
-  accepted the layers.** It calls `create_service`, then posts every layer
-  definition in one `add_to_definition`. When AGOL rejects that post (`Invalid
-  definition for ...List[LayerCoreInfo]`, a 400 that names a .NET type rather
-  than a layer) the method raises and the empty service it created is lost with
-  the exception. Inside `provision` that would burn the project's real service
-  name. `spike-master` handles it: it recovers the orphan, runs
-  `layer_probe.probe()` to post each layer alone and then with one suspect
-  property group removed at a time, and reports which layer and which property
-  AGOL refuses. First seen on the Kinetic master (19 layers, 1 table); the Zayo
-  master never triggered it.
-- **`copy_feature_layer_collection()` copies nothing by default.** It selects a
-  *subset*, so called with both `layers` and `tables` left as `None` it raises
-  rather than copying everything. The values it selects with are **positional
-  indexes** into `Item.layers` / `Item.tables` — it evaluates `self.layers[idx]`
-  — not layer ids. The master's 17 layers carry ids running to 19, so passing ids
-  indexes off the end of the list: a plausible-looking fix that fails differently.
-  `copy_whole_service()` in `cli.py` wraps this and `tests/test_spike_copy.py`
-  pins both behaviours. The method also strips each layer's `indexes` before
-  applying the definition, so a schema diff is *expected* to report index
-  differences — that is the method's doing, not the template's, and should not be
-  read as the master failing to copy.
+- **`copy_feature_layer_collection()` cannot copy a master with relationships,
+  which is why the copy is ours.** It posts each layer's admin definition
+  verbatim, `relationships` included, and a relationship names its related
+  layer by the template's layer *id* — which AGOL renumbers on the way in. The
+  Kinetic master (Equipment Redline ↔ Test Results Redline, ids 15 and 20) was
+  refused outright: `Invalid definition for ...List[LayerCoreInfo]`, a 400
+  naming a .NET type and no layer. `layer_probe.probe()` found it by posting each
+  layer alone and then with one suspect property group removed at a time: only
+  the two relationship layers were refused, and both were accepted once
+  `relationships` was removed. `master.py` now does what Esri's own
+  `clone_items` does — posts the layers without relationships, then one
+  service-level `addToDefinition` of `{"layers": [{"id", "relationships"}]}`
+  with `relatedTableId` remapped by layer name. The library's method also
+  created the service *before* the post that failed and raised with that item
+  lost inside the exception; ours creates, records, then posts, so a refused
+  post is in state for `--destroy`. The Zayo master has no relationships and
+  never triggered any of this.
+- **The copy strips each layer's `indexes` before posting it** (as the library
+  did), so a schema diff is *expected* to report index differences — that is
+  the copy's doing, not the template's, and should not be read as the master
+  failing to copy. Stage 1 puts the user-defined ones back.
 
 ## Known gaps
 
@@ -244,9 +244,9 @@ Real, understood, not yet fixed. Each has already produced a wrong answer once.
   are both keyed on `--name` (snapshots on the template key), so a second
   template set gets a second name rather than the same one.
 - **Contingent values are not carried to the copied master.**
-  `copy_feature_layer_collection()` builds its payload from each layer's admin
-  definition, and contingent values live at a separate REST sub-resource, so they
-  are not in it. arcgis exposes them read-only (`FeatureLayer.contingent_values`,
+  The copy builds its payload from each layer's admin definition, and
+  contingent values live at a separate REST sub-resource, so they are not in
+  it. arcgis exposes them read-only (`FeatureLayer.contingent_values`,
   `.field_groups`) and ships no writer, so reapplying them needs raw REST against
   `<layer>/contingentValues`. Nothing detects or reports the loss yet -- same
   class of silent gap the indexes were.
@@ -285,6 +285,13 @@ decisions in waiting, not defects.
 
 2. **Contingent values are reported, never repaired.** See Known gaps. The report
    exists so the loss is named; the writer does not exist at all in arcgis.
+
+3. **The relationship fixup has not yet run live.** The owned copy and
+   `reapply_relationships()` were built from the Kinetic probe result (only the
+   two relationship layers refused; accepted once `relationships` was removed)
+   and from what `clone_items` posts, but no run has yet completed against the
+   Kinetic master. The spike is the test: its diff rates a missing relationship
+   critical, so `USABLE WITH FIXUPS` with no relationship rows is the pass.
 
 ## Not in the manifest, on purpose
 

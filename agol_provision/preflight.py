@@ -9,9 +9,7 @@ So this stage does everything that can be done without writing: resolve the
 template items, render every title and service name, and ask AGOL whether each
 name is free. **A taken name is a hard failure and is never auto-suffixed.** A
 silently renamed service is worse than a stopped run: the project carries a name
-nobody chose, and every downstream reference points at it. Note that
-`copy_feature_layer_collection()` *does* auto-suffix internally, which is the
-second reason the collision has to be caught here.
+nobody chose, and every downstream reference points at it.
 
 Problems are collected rather than raised one at a time. This is run from a
 different machine than it is written on, so reporting four collisions in one run

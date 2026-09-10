@@ -189,7 +189,7 @@ name so its manifest and report sit alongside the first instead of replacing it,
 and every later command then needs `--manifest agol_provision/templates/<name>.yaml`:
 
 ```bat
-python -m agol_provision.cli discover --ids ids-anthropic.txt --name anthropic-standard
+python -m agol_provision.cli discover --ids ids-companyA.txt --name companyA-standard
 ```
 
 The dependency graph is derived by scanning each item's JSON for the ids of other
@@ -254,31 +254,32 @@ service named `ZZZ_SPIKE_TEST_<prefix>`, diffs its schema against the template,
 writes `docs/spike-master-copy.md`, and deletes it. `--keep` leaves it for
 inspection.
 
-- **IDENTICAL** — `copy_feature_layer_collection()` is the master strategy.
+- **IDENTICAL** — the copy is the master strategy.
 - **USABLE WITH FIXUPS** — same, plus reapplying the listed settings.
 - **NOT USABLE** — critical structure is lost; fall back to publishing from the
   file geodatabase.
 
-If AGOL refuses the copied layer definitions outright (a 400 naming
-`LayerCoreInfo`, not a layer), the spike recovers the empty service the copy
-left behind, posts each layer to it alone to find which one AGOL rejects, then
-re-posts that layer with one likely property removed at a time to name the
-property. The report records the verdict, the layer-by-layer result, and each
-rejected definition as posted. Run it before `provision` on any new template
-set: the same copy failing inside `provision` would burn the project's real
-service name.
+The copy is the same two calls `provision` makes — create the empty service,
+post every layer definition — followed by the same relationship fixup, so the
+diff checks the real thing: a relationship missing from the copy is rated
+critical. If AGOL refuses the layer definitions outright (a 400 naming
+`LayerCoreInfo`, not a layer), the spike posts each layer alone to find which
+one AGOL rejects, then re-posts that layer with one likely property removed at
+a time to name the property. The report records the verdict, the layer-by-layer
+result, and each rejected definition as posted. Run it before `provision` on
+any new template set: the same refusal inside `provision` burns the project's
+real service name.
 
 > AGOL reserves a hosted service name permanently, even after deletion. The spike
-> reuses one fixed name so it only ever burns that one.
+> takes the first free name in its series — `ZZZ_SPIKE_TEST_<prefix>`, then `_2`,
+> `_3` — so each run burns one.
 
 **What it touches.** The template is only ever read. The command creates exactly
 one new feature service, and its `delete()` targets that newly created item and
 nothing else. That is checked rather than assumed:
 `safety.py` refuses the delete if the item is the template, lacks the
-`ZZZ_SPIKE_TEST_` prefix, or is not the service the copy returned — leaving it in
-place instead. When the copy raises partway, the service it created is found
-again only by its exact spike name, this account, and a creation time after the
-run started; anything older is left alone. A leftover test service is a ten-second cleanup; a wrongly deleted
+`ZZZ_SPIKE_TEST_` prefix, or is not the service this run created — leaving it
+in place instead. A leftover test service is a ten-second cleanup; a wrongly deleted
 service is not. Pass `--keep` to skip the delete entirely.
 
 > The codebase has exactly two `delete()` calls — this one and `provision
@@ -324,8 +325,6 @@ a collision found at stage 1 has already burned the name.
 **A taken name stops the run, and nothing is ever renamed automatically.** A
 silently suffixed service (`CompanyA_Moline_2`) is worse than a stopped run: the
 project carries a name nobody chose and every downstream reference points at it.
-Note that `copy_feature_layer_collection()` *does* auto-suffix internally, which
-is the second reason the collision has to be caught here rather than at stage 1.
 
 Problems are collected rather than reported one at a time, so a run tells you
 about all four collisions at once instead of one per attempt.
@@ -346,17 +345,27 @@ still validated when the manifest loads, just not acted on.
 
 ### The master service
 
-Stage 1 copies the template master with `copy_feature_layer_collection()`, which
-Phase 0b proved carries every layer, table, field, field type, domain, attachment
-setting, and editor-tracking setting intact. Two things it does not do on its
-own, which this stage handles:
+Stage 1 copies the template master the way `copy_feature_layer_collection()`
+does internally — create the service with the template's settings, post every
+layer and table definition in one call — which Phase 0b proved carries every
+layer, table, field, field type, domain, attachment setting, and editor-tracking
+setting intact. It is done by hand rather than through the library because of
+the first thing below. The service is created and recorded in state *before*
+the layer post, so a post AGOL refuses leaves a recorded, empty service that
+`--destroy` removes (its name is burned; the next attempt needs
+`--service-name-override`). Two things the copy cannot carry, which this stage
+puts back:
 
-**The item title.** The copy names the item after the *service*, so without a
-follow-up the master's title reads `CompanyA_Moline` rather than `CompanyA
-Moline`. Stage 1 sets the title, a description naming the template it came from,
-and tags.
+**The relationships.** A relationship names its related layer by the template's
+layer *id*, and AGOL renumbers layers as it adds them, so a definition posted
+with its relationships is refused outright — the first master with
+relationships (Kinetic, two of them) failed with a 400 that named a .NET type
+and no layer. The layers are posted without their relationships, then one
+service-level call adds them back with `relatedTableId` remapped by layer
+name, which is what Esri's own `clone_items` does. A re-run finds them present
+and posts nothing.
 
-**The indexes.** `copy_feature_layer_collection()` strips each layer's `indexes`
+**The indexes.** The copy strips each layer's `indexes`
 before applying the definition, so even a perfect copy arrives without them. The
 spike reported 83 missing index entries; 73 are system-generated names that could
 never have matched, and 10 are real — `build_status_Index` on 9 layers and

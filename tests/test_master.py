@@ -66,6 +66,8 @@ class FakeManager:
         self._raises = raises
         self._rejects = set(rejects)
         self._props = props if props is not None else {}
+        # The admin view of the layer: what the copy reads to build its post.
+        self.properties = self._props
 
     def update_definition(self, json_dict):
         self.calls.append(json_dict)
@@ -408,6 +410,7 @@ class TestReapplyUserIndexes:
 
 # ---------------------------------------------------------------- the command
 
+import copy
 import json
 
 import pytest as _pytest  # noqa: F811  (already imported; kept local to this section)
@@ -422,9 +425,10 @@ class FakeService:
     """A Feature Service item: enough of it for stage 1 and for --destroy."""
 
     def __init__(self, itemid, title, layer_names=("redline",), registry=None,
-                 typeKeywords=("Hosted Service",), indexes=None, copy_returns=True,
+                 typeKeywords=("Hosted Service",), indexes=None,
                  capabilities="Query", queries=None, layer_ids=None,
-                 snippet="", description="", tags=None, contingent=None):
+                 snippet="", description="", tags=None, contingent=None,
+                 relationships=None):
         self.itemid = itemid
         self.title = title
         self.snippet = snippet
@@ -441,6 +445,8 @@ class FakeService:
                                 layer_id=layer_id)
             if queries and n in queries:
                 props["viewDefinitionQuery"] = queries[n]
+            if relationships and n in relationships:
+                props["relationships"] = [dict(r) for r in relationships[n]]
             layer = FakeLayer(props)
             layer.contingent_values = contingent
             self.layers.append(layer)
@@ -448,43 +454,16 @@ class FakeService:
         self.url = (
             f"https://services.arcgis.com/org/arcgis/rest/services/{title}/FeatureServer"
         )
-        self.properties = {"capabilities": capabilities}
+        self.properties = {"capabilities": capabilities, "name": title}
         self.manager = FakeServiceManager(self)
         self.updates = []
         self.deleted = False
-        self.copy_calls = []
         self._registry = registry if registry is not None else {}
-        self._copy_returns = copy_returns
         self._registry[itemid] = self
 
     @property
     def _next_id(self):
         return f"{len(self._registry):032x}"
-
-    def copy_feature_layer_collection(self, service_name, layers=None, tables=None):
-        self.copy_calls.append({"service_name": service_name, "layers": layers, "tables": tables})
-        if not self._copy_returns:
-            return None
-        # The copy is named after the *service*, arrives with no indexes, and
-        # RENUMBERS the layers: ids do not survive copy_feature_layer_collection.
-        # Names do, which is why the views stage matches on them.
-        copy = FakeService(
-            itemid="c" * 32, title=service_name,
-            layer_names=[layer.properties["name"] for layer in self.layers],
-            layer_ids=list(range(len(self.layers))),
-            registry=self._registry,
-        )
-        # AGOL recreates the system indexes under its own names -- except any
-        # over GlobalID, which the live copy carries on none of its 18 layers.
-        # The user-defined ones are the copy's real loss, which is why stage 1
-        # exists.
-        for src, dst in zip(self.layers, copy.layers):
-            user = {i["name"] for i in user_defined_indexes(src.properties)}
-            dst.properties["indexes"] = [
-                dict(i) for i in src.properties.get("indexes", []) or []
-                if i["name"] not in user and index_fields(i) != ["globalid"]
-            ]
-        return copy
 
     def update(self, item_properties=None, **kwargs):
         props = item_properties or kwargs
@@ -501,11 +480,56 @@ class FakeService:
 
 
 class FakeServiceManager:
-    """The FeatureLayerCollection manager: create_view lives here."""
+    """The FeatureLayerCollection manager: create_view and add_to_definition."""
 
     def __init__(self, service):
         self.service = service
         self.create_view_calls = []
+        self.definition_calls = []
+        self.refuse_layers = None  # an error message, to mimic AGOL saying no
+
+    def add_to_definition(self, json_dict):
+        """What AGOL does with a service-level post.
+
+        A full layer definition (it carries `fields`) becomes a new layer with
+        the next id from 0 -- ids do not survive the copy, names do -- and
+        AGOL recreates the system indexes under its own names, except any over
+        GlobalID. A relationship whose relatedTableId is not a layer of this
+        service is refused, which is the bug that made the copy ours. An entry
+        with only `id` and `relationships` adds relationships to that layer.
+        """
+        self.definition_calls.append(copy.deepcopy(json_dict))
+        entries = json_dict.get("layers", []) + json_dict.get("tables", [])
+        if entries and "fields" in entries[0]:
+            if self.refuse_layers:
+                raise RuntimeError(self.refuse_layers)
+            next_ids = list(range(len(self.service.layers), len(self.service.layers) + len(entries)))
+            for entry in entries:
+                for r in entry.get("relationships", []) or []:
+                    if r["relatedTableId"] not in next_ids:
+                        raise RuntimeError("Unable to add feature service definition.\n"
+                                           "Invalid definition for LayerCoreInfo\n"
+                                           "(Error Code: 400)")
+            for new_id, entry in zip(next_ids, entries):
+                props = copy.deepcopy(entry)
+                props["id"] = new_id
+                props["indexes"] = [
+                    idx(f"PK__{entry['name']}__{new_id:04x}", "OBJECTID"),
+                    *(idx(f"{f}Index", f) for f in ("CreationDate", "Creator", "EditDate", "Editor")),
+                ]
+                self.service.layers.append(FakeLayer(props))
+            return {"success": True}
+        by_id = {lyr.properties["id"]: lyr for lyr in self.service.layers}
+        for entry in entries:
+            if set(entry) != {"id", "relationships"}:
+                raise RuntimeError("a relationship post carries only id and relationships")
+            for r in entry["relationships"]:
+                if r["relatedTableId"] not in by_id:
+                    raise RuntimeError(f"related table {r['relatedTableId']} does not exist")
+            by_id[entry["id"]].properties.setdefault("relationships", []).extend(
+                dict(r) for r in entry["relationships"]
+            )
+        return {"success": True}
 
     def create_view(self, **kwargs):
         self.create_view_calls.append(kwargs)
@@ -520,10 +544,12 @@ class FakeServiceManager:
 
 
 class FakeContent:
-    def __init__(self, registry, taken=()):
+    def __init__(self, registry, taken=(), refuse_layers=None):
         self._registry = registry
         self._taken = set(taken)
         self.queries = []
+        self.created = []
+        self._refuse_layers = refuse_layers
 
     def get(self, item_id):
         return self._registry.get(item_id)
@@ -532,10 +558,24 @@ class FakeContent:
         self.queries.append(service_name)
         return service_name not in self._taken
 
+    def create_service(self, name, create_params=None, item_properties=None, **kw):
+        """An empty service under `name`, titled from item_properties."""
+        self.created.append({"name": name, "create_params": create_params,
+                             "item_properties": item_properties})
+        props = item_properties or {}
+        service = FakeService(
+            itemid="c" * 32, title=props.get("title", name), layer_names=[],
+            registry=self._registry, capabilities=create_params.get("capabilities", "Query"),
+            snippet=props.get("snippet", ""), description=props.get("description", ""),
+            tags=props.get("tags"),
+        )
+        service.manager.refuse_layers = self._refuse_layers
+        return service
+
 
 class FakeGIS:
-    def __init__(self, registry, taken=()):
-        self.content = FakeContent(registry, taken)
+    def __init__(self, registry, taken=(), refuse_layers=None):
+        self.content = FakeContent(registry, taken, refuse_layers)
         self.users = type("U", (), {"me": type("M", (), {
             "privileges": list(REQUIRED_PRIVILEGES),
             "username": "tester", "role": "org_admin"})()})()
@@ -611,25 +651,61 @@ class TestProvisionStage1:
     def test_creates_the_master_under_the_preflight_approved_name(
         self, monkeypatch, manifest_file, state_dir, registry, template
     ):
-        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        gis = FakeGIS(registry)
+        result = self.invoke(monkeypatch, manifest_file, state_dir, gis)
         assert result.exit_code == 0, result.output
-        assert template.copy_calls[0]["service_name"] == "CompanyA_Moline"
+        assert gis.content.created[0]["name"] == "CompanyA_Moline"
+        assert gis.content.created[0]["create_params"]["name"] == "CompanyA_Moline"
 
-    def test_copies_every_layer_and_table_by_positional_index(
+    def test_posts_every_layer_in_one_call_without_indexes_or_relationships(
         self, monkeypatch, manifest_file, state_dir, registry, template
     ):
-        """`copy_feature_layer_collection` copies a subset and raises on None."""
+        """Indexes go back by hand afterwards; relationships name the related
+        layer by an id AGOL renumbers, so they go back afterwards too."""
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        assert template.copy_calls[0]["layers"] == [0, 1]
-        assert template.copy_calls[0]["tables"] == []
+        posted = registry["c" * 32].manager.definition_calls[0]
+        assert [l["name"] for l in posted["layers"]] == ["redline", "bores"]
+        assert posted["tables"] == []
+        assert all("indexes" not in l and "relationships" not in l for l in posted["layers"])
 
     def test_sets_the_item_title_to_the_display_name(
         self, monkeypatch, manifest_file, state_dir, registry, template
     ):
-        """The copy names the item after the service, so this is not cosmetic."""
-        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        copy = registry["c" * 32]
-        assert copy.updates[0]["title"] == "CompanyA Moline"
+        """The service is named for the URL; the item is titled for people."""
+        gis = FakeGIS(registry)
+        self.invoke(monkeypatch, manifest_file, state_dir, gis)
+        assert gis.content.created[0]["item_properties"]["title"] == "CompanyA Moline"
+        assert registry["c" * 32].title == "CompanyA Moline"
+
+    def test_reapplies_relationships_with_the_layer_ids_remapped(
+        self, monkeypatch, manifest_file, state_dir, registry
+    ):
+        """The Kinetic case: template ids 11 and 12 become 0 and 1 in the copy,
+        and each relationship must point at the *layer* it pointed at, not the
+        id it carried."""
+        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
+                    typeKeywords=["View Service"])
+        FakeService(
+            TEMPLATE_MASTER, "Kinetic", layer_names=["redline", "bores"], registry=registry,
+            relationships={
+                "redline": [{"id": 0, "name": "Bores", "relatedTableId": 12,
+                             "cardinality": "esriRelCardinalityOneToMany",
+                             "role": "esriRelRoleOrigin", "keyField": "GlobalID"}],
+                "bores": [{"id": 0, "name": "Redline", "relatedTableId": 11,
+                           "cardinality": "esriRelCardinalityOneToMany",
+                           "role": "esriRelRoleDestination", "keyField": "parentguid"}],
+            },
+        )
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert result.exit_code == 0, result.output
+        assert "Relationships: 2 applied" in result.output
+        copy = {l.properties["name"]: l.properties for l in registry["c" * 32].layers}
+        assert copy["redline"]["relationships"][0]["relatedTableId"] == copy["bores"]["id"]
+        assert copy["bores"]["relationships"][0]["relatedTableId"] == copy["redline"]["id"]
+
+        # A re-run finds them present rather than posting them again.
+        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert "Relationships: 0 applied, 2 already present" in result.output
 
     def test_reapplies_the_user_index_and_not_the_system_one(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -655,8 +731,9 @@ class TestProvisionStage1:
     def test_a_dry_run_creates_nothing(
         self, monkeypatch, manifest_file, state_dir, registry, template
     ):
-        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry), ["--dry-run"])
-        assert template.copy_calls == []
+        gis = FakeGIS(registry)
+        self.invoke(monkeypatch, manifest_file, state_dir, gis, ["--dry-run"])
+        assert gis.content.created == []
 
     def test_a_failed_preflight_creates_nothing(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -664,15 +741,16 @@ class TestProvisionStage1:
         gis = FakeGIS(registry, taken=["CompanyA_Moline"])
         result = self.invoke(monkeypatch, manifest_file, state_dir, gis)
         assert result.exit_code == 1
-        assert template.copy_calls == []
+        assert gis.content.created == []
 
     def test_a_resume_does_not_create_the_master_twice(
         self, monkeypatch, manifest_file, state_dir, registry, template
     ):
         """The one failure mode that leaks an orphaned service."""
-        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        assert len(template.copy_calls) == 1
+        gis = FakeGIS(registry)
+        self.invoke(monkeypatch, manifest_file, state_dir, gis)
+        self.invoke(monkeypatch, manifest_file, state_dir, gis)
+        assert len(gis.content.created) == 1
 
     def test_a_resume_reattempts_the_indexes_on_the_existing_master(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -684,8 +762,8 @@ class TestProvisionStage1:
         """
         self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
-        assert "rechecking indexes" in result.output
-        assert "2 already present" in result.output
+        assert "rechecking relationships and indexes" in result.output
+        assert "Indexes: 0 applied, 2 already present" in result.output
 
     def test_a_resume_whose_master_has_vanished_fails_clearly(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -753,15 +831,19 @@ class TestProvisionStage1:
         result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         assert "Not carried over" not in result.output
 
-    def test_a_copy_returning_none_fails_loudly(
-        self, monkeypatch, manifest_file, state_dir, registry
+    def test_a_refused_layer_post_is_recorded_and_fails_loudly(
+        self, monkeypatch, manifest_file, state_dir, registry, template
     ):
-        FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
-                    typeKeywords=["View Service"])
-        FakeService(TEMPLATE_MASTER, "Zayo Chicago", registry=registry, copy_returns=False)
-        result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        """The Kinetic failure. The empty service exists and its name is burned,
+        so it must be in state for --destroy, and the run must say so."""
+        gis = FakeGIS(registry, refuse_layers="Invalid definition for LayerCoreInfo (400)")
+        result = self.invoke(monkeypatch, manifest_file, state_dir, gis)
         assert result.exit_code == 1
-        assert "returned None" in result.output
+        assert "LayerCoreInfo" in result.output
+        assert "--destroy companya-moline" in result.output
+        assert "spike-master" in result.output
+        assert self.state(state_dir)["items"]["master"]["item_id"] == "c" * 32
+        assert registry["c" * 32].layers == []
 
     def test_index_failures_are_reported_without_losing_the_master(
         self, monkeypatch, manifest_file, state_dir, registry, template, monkeypatch_fail=None

@@ -64,42 +64,20 @@ def refuse_delete_reason(
     return None
 
 
-def _is_spike_title(title: str, expected_name: str) -> bool:
-    """The spike's exact name, or the `_N` copy_feature_layer_collection() appends
-    when that name is already taken."""
-    if title == expected_name:
-        return True
-    rest = title[len(expected_name):] if title.startswith(expected_name) else ""
-    return rest.startswith("_") and rest[1:].isdigit()
+def free_spike_name(gis: Any, master_id: str) -> str:
+    """The spike's name for this run: the series name, or the first free `_N`.
 
-
-def find_abandoned_spike(gis: Any, expected_name: str, *, since_ms: int) -> Any | None:
-    """Recover the service the copy created and then lost.
-
-    `copy_feature_layer_collection()` creates the empty service first and posts
-    the layer definitions second; when AGOL refuses the definitions, the method
-    raises and the item it created goes with the exception. This finds it again
-    so the spike's guarded delete can run, and is narrower than the guard: the
-    spike's own name (or the library's `_N` suffix), owned by this account, and
-    created after `since_ms` -- a leftover from an earlier run is not ours to
-    touch, whatever it is called. The newest match is the one this run made.
+    AGOL reserves a hosted service name while the service exists and, per Esri,
+    after it is deleted. The second run against the Kinetic master got `_2`, so
+    the suffix is checked for rather than left to the library. The result always
+    starts with `spike_service_name()`, which is what the delete guard matches.
     """
-    if not expected_name.startswith(SPIKE_PREFIX):
-        return None
-    me = gis.users.me.username
-    query = f'title:{expected_name} AND owner:{me} AND type:"Feature Service"'
-    candidates = []
-    for item in gis.content.search(query, max_items=50):
-        if getattr(item, "owner", None) != me:
-            continue
-        if getattr(item, "type", None) != "Feature Service":
-            continue
-        if not _is_spike_title(str(getattr(item, "title", "") or ""), expected_name):
-            continue
-        created = getattr(item, "created", None) or 0
-        if created < since_ms:
-            continue
-        candidates.append((created, item))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda c: c[0])[1]
+    base = spike_service_name(master_id)
+    name = base
+    n = 1
+    while not gis.content.is_service_name_available(name, "Feature Service"):
+        n += 1
+        name = f"{base}_{n}"
+        if n > 50:
+            raise RuntimeError(f"No free name in the series {base}_N after 50 tries.")
+    return name

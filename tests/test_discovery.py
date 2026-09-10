@@ -212,3 +212,21 @@ class TestIdFileParsing:
         with pytest.raises(ValueError) as exc:
             self._collect([f"{_id(2)}  # some title"], {})
         assert "some title" not in str(exc.value)
+
+
+class TestReportPath:
+    """The report used to land at a fixed docs/discovery-report.md, so discovering a
+    second template set silently overwrote the first set's findings -- the one
+    discovery output that did not already follow --name."""
+
+    def test_follows_the_manifest_name(self, tmp_path):
+        from agol_provision.discovery import report_path
+
+        assert report_path(tmp_path, "anthropic-standard") == (
+            tmp_path / "discovery-report-anthropic-standard.md"
+        )
+
+    def test_two_names_never_collide(self, tmp_path):
+        from agol_provision.discovery import report_path
+
+        assert report_path(tmp_path, "vsclr-standard") != report_path(tmp_path, "anthropic-standard")

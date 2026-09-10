@@ -180,9 +180,17 @@ python -m agol_provision.cli discover --ids ids.txt
 
 | Path | What it is |
 | --- | --- |
-| `agol_provision/templates/vsclr-standard.yaml` | The manifest. Review and edit it. |
+| `agol_provision/templates/<name>.yaml` | The manifest. Review and edit it. |
 | `snapshots/*.json` | Per-template JSON. **Commit these** — they are the version history. |
-| `docs/discovery-report.md` | Findings to read before building. |
+| `docs/discovery-report-<name>.md` | Findings to read before building. |
+
+`<name>` is `--name`, default `vsclr-standard`. A second template set gets its own
+name so its manifest and report sit alongside the first instead of replacing it,
+and every later command then needs `--manifest agol_provision/templates/<name>.yaml`:
+
+```bat
+python -m agol_provision.cli discover --ids ids-anthropic.txt --name anthropic-standard
+```
 
 The dependency graph is derived by scanning each item's JSON for the ids of other
 template items, so it finds edges regardless of item type — including those buried

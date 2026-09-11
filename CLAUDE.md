@@ -272,8 +272,15 @@ Real, understood, not yet fixed. Each has already produced a wrong answer once.
   contingent values live at a separate REST sub-resource, so they are not in
   it. arcgis exposes them read-only (`FeatureLayer.contingent_values`,
   `.field_groups`) and ships no writer, so reapplying them needs raw REST against
-  `<layer>/contingentValues`. Nothing detects or reports the loss yet -- same
-  class of silent gap the indexes were.
+  `<layer>/contingentValues` -- and unlike relationships, `clone_items` does not
+  carry them either, so there is no Esri code to take the contract from. The
+  loss is **reported** (console and `master.gaps` in the run log), not repaired.
+  It went unreported on the first DeWitt run because the check looked for a
+  top-level `contingentValues` key that the sub-resource does not have: the
+  real shape is `contingentValuesDefinition.fieldGroups[].contingencies[]`, and
+  the layer definition's `hasContingentValuesDefinition` flag is the cheap,
+  definitive presence check. Zayo has none, so "nothing reported" had always
+  looked right.
 - **Cloned maps may reference layers by an index the new master renumbered.**
   Maps and apps reference layers by URL with the layer index in it
   (`.../FeatureServer/11`), and `remap_data()` rewrites *item* ids, not layer
@@ -308,7 +315,9 @@ decisions in waiting, not defects.
    treat the earlier failure as unexplained, most likely transient.
 
 2. **Contingent values are reported, never repaired.** See Known gaps. The report
-   exists so the loss is named; the writer does not exist at all in arcgis.
+   exists so the loss is named and handed over; the writer does not exist at all
+   in arcgis. The corrected detection has not yet been seen live -- the DeWitt
+   resume after 2026-09-11 is the first run that can show it.
 
 ## Not in the manifest, on purpose
 

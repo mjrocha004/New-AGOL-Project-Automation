@@ -896,12 +896,15 @@ class TestProvisionStage1:
         """Not repaired -- arcgis ships no writer -- but named rather than silent."""
         FakeService(TEMPLATE_VIEW, "Design View", registry=registry,
                     typeKeywords=["View Service"])
-        FakeService(TEMPLATE_MASTER, "Zayo Chicago", layer_names=["redline"],
-                    registry=registry, contingent={"contingentValues": [{"id": 1}]})
+        FakeService(TEMPLATE_MASTER, "Kinetic", layer_names=["redline"],
+                    registry=registry, contingent=REAL_CONTINGENT_VALUES)
         result = self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
         assert result.exit_code == 0, result.output
         assert "contingent values" in result.output
         assert "redline" in result.output
+        assert "add them by hand" in result.output
+        # And it is in the run log, so the loss is findable after the fact.
+        assert "master.gaps" in (state_dir / "companya-moline.log").read_text()
 
     def test_a_clean_copy_reports_no_gaps(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -1316,33 +1319,68 @@ class TestReapplyMissingCoverage:
         assert copy.manager.calls[0]["indexes"][0]["isUnique"] is True
 
 
+# What <layer>/contingentValues really returns. There is no top-level
+# "contingentValues" key: the values live in fieldGroups[].contingencies under
+# contingentValuesDefinition. The first check looked for the key that does not
+# exist, so the Kinetic master's contingent values went unreported on DeWitt.
+REAL_CONTINGENT_VALUES = {
+    "stringDicts": [{"domain": "build_status", "entries": ["Placed", "Failed QC"]}],
+    "contingentValuesDefinition": {
+        "layerID": 15, "layerName": "Equipment Redline", "hasSubType": False,
+        "fieldGroups": [{
+            "name": "Status by type", "restrictive": True,
+            "fields": ["equipment_type", "build_status"],
+            "contingencies": [
+                {"id": 1, "types": ["CODED", "CODED"], "values": [1, 0]},
+                {"id": 2, "types": ["CODED", "CODED"], "values": [2, 1]},
+            ],
+        }],
+    },
+}
+NO_CONTINGENT_VALUES = {"stringDicts": [], "contingentValuesDefinition": {"fieldGroups": []}}
+
+
 class TestSchemaGaps:
     """What the copy loses and nothing puts back. Reported, never guessed at."""
 
-    def service(self, name, indexes=(), contingent=None):
+    def service(self, name, indexes=(), contingent=None, flag=None):
         layer = FakeLayer(layer_props(name, indexes, extra_fields=["build_status"]))
         layer.contingent_values = contingent
+        if flag is not None:
+            layer.properties["hasContingentValuesDefinition"] = flag
         return FakeFLC([layer])
 
     def test_reports_a_layer_whose_contingent_values_did_not_survive(self):
+        """The DeWitt case, with the response shape AGOL actually returns."""
         from agol_provision.master import schema_gaps
 
-        template = self.service("redline", contingent={"contingentValues": [{"id": 1}]})
-        copy = self.service("redline", contingent={})
+        template = self.service("redline", contingent=REAL_CONTINGENT_VALUES, flag=True)
+        copy = self.service("redline", contingent=NO_CONTINGENT_VALUES, flag=False)
         gaps = schema_gaps(template, copy)
         assert [(g.layer, g.kind) for g in gaps] == [("redline", "contingent values")]
+        assert "1 field group" in gaps[0].detail and "2 contingencies" in gaps[0].detail
+
+    def test_the_layer_flag_alone_is_enough_to_report_a_loss(self):
+        """`hasContingentValuesDefinition` is on the layer definition itself,
+        so the loss is named even when the sub-resource cannot be read."""
+        from agol_provision.master import schema_gaps
+
+        template = self.service("redline", contingent={}, flag=True)
+        copy = self.service("redline", contingent={}, flag=False)
+        assert [(g.layer, g.kind) for g in schema_gaps(template, copy)] == [
+            ("redline", "contingent values")]
 
     def test_says_nothing_when_the_template_defines_none(self):
         from agol_provision.master import schema_gaps
 
-        assert schema_gaps(self.service("redline"), self.service("redline")) == []
+        assert schema_gaps(self.service("redline", contingent=NO_CONTINGENT_VALUES, flag=False),
+                           self.service("redline", contingent=NO_CONTINGENT_VALUES, flag=False)) == []
 
     def test_says_nothing_when_the_copy_kept_them(self):
         from agol_provision.master import schema_gaps
 
-        cv = {"contingentValues": [{"id": 1}]}
-        assert schema_gaps(self.service("a", contingent=cv),
-                           self.service("a", contingent=cv)) == []
+        assert schema_gaps(self.service("a", contingent=REAL_CONTINGENT_VALUES, flag=True),
+                           self.service("a", contingent=REAL_CONTINGENT_VALUES, flag=True)) == []
 
     def test_reports_an_index_field_the_copy_covers_nowhere(self):
         from agol_provision.master import schema_gaps

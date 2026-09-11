@@ -494,17 +494,54 @@ def missing_index_coverage(template_properties: Any, new_properties: Any) -> lis
 
 
 def _contingent_values(layer: Any) -> dict:
-    """A layer's contingent values, or {} when there are none or they cannot be read.
+    """What `<layer>/contingentValues` returns, or {} when it cannot be read.
 
     `FeatureLayer.contingent_values` swallows its own errors and returns {}, so
-    "unreadable" and "none defined" are indistinguishable. Both are treated as
-    "nothing to report" rather than as a loss -- claiming a loss we cannot see is
-    worse than staying quiet about one we cannot confirm.
+    "unreadable" and "none defined" look the same here. That is why presence is
+    also read from the layer definition's `hasContingentValuesDefinition` flag.
     """
     try:
         return getattr(layer, "contingent_values", None) or {}
     except Exception:
         return {}
+
+
+@dataclass(frozen=True)
+class ContingentValues:
+    """How much of a contingent-values definition a layer carries."""
+
+    field_groups: int
+    contingencies: int
+
+    def __bool__(self) -> bool:
+        return self.field_groups > 0 or self.contingencies > 0
+
+
+def contingent_values_on(layer: Any) -> ContingentValues:
+    """Count a layer's field groups and contingencies, from the real response shape.
+
+    The sub-resource has no top-level `contingentValues` key. The definition is
+    `contingentValuesDefinition.fieldGroups[]`, each holding `contingencies[]`.
+    The first version of this check looked for the key that does not exist and
+    so never fired -- the Kinetic master's contingent values went unreported on
+    the DeWitt run. The layer definition's own `hasContingentValuesDefinition`
+    flag counts as one group when the sub-resource says nothing, so an
+    unreadable sub-resource cannot hide a loss the definition admits to.
+    """
+    raw = _contingent_values(layer)
+    definition = raw.get("contingentValuesDefinition") or raw
+    groups = list(definition.get("fieldGroups") or [])
+    contingencies = sum(len(g.get("contingencies") or []) for g in groups)
+    # Older or flatter shapes, just in case: count them rather than miss them.
+    contingencies += len(definition.get("contingentValues") or [])
+    if not groups and not contingencies:
+        try:
+            flagged = bool(layer.properties.get("hasContingentValuesDefinition"))
+        except Exception:
+            flagged = False
+        if flagged:
+            return ContingentValues(field_groups=1, contingencies=0)
+    return ContingentValues(field_groups=len(groups), contingencies=contingencies)
 
 
 def schema_gaps(template_service: Any, new_service: Any) -> list[SchemaGap]:
@@ -520,11 +557,12 @@ def schema_gaps(template_service: Any, new_service: Any) -> list[SchemaGap]:
     for template_layer, new_layer in _paired_layers(template_service, new_service):
         name = str(template_layer.properties.get("name", "?"))
 
-        wanted = _contingent_values(template_layer).get("contingentValues")
-        if wanted and not _contingent_values(new_layer).get("contingentValues"):
+        wanted = contingent_values_on(template_layer)
+        if wanted and not contingent_values_on(new_layer):
             gaps.append(SchemaGap(
                 name, "contingent values",
-                f"{len(wanted)} defined on the template, none on the copy",
+                f"{wanted.field_groups} field group(s), {wanted.contingencies} "
+                f"contingencies on the template; none on the copy",
             ))
 
         for index in missing_index_coverage(template_layer.properties, new_layer.properties):

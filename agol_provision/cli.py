@@ -1268,7 +1268,7 @@ def _reapply_and_report(template: Any, service: Any, log: Any) -> None:
         _summarise("Indexes", outcomes, "index", lambda o: o.index)
     if coverage:
         _summarise("Indexes AGOL did not recreate", coverage, "index", lambda o: o.index)
-    _report_schema_gaps(template, service)
+    _report_schema_gaps(template, service, log)
 
 
 def _index_tally(outcomes: list[Any]) -> str:
@@ -1310,7 +1310,7 @@ def _summarise(label: str, outcomes: list[Any], noun: str, name_of: Any) -> None
                   "definition query still works.")
 
 
-def _report_schema_gaps(template: Any, service: Any) -> None:
+def _report_schema_gaps(template: Any, service: Any, log: Any) -> None:
     """Name what the copy lost and this tool does not put back.
 
     Nothing here is repaired: contingent values have no writer in the arcgis API
@@ -1333,6 +1333,12 @@ def _report_schema_gaps(template: Any, service: Any) -> None:
     by_kind: dict[str, list[str]] = defaultdict(list)
     for gap in gaps:
         by_kind[gap.kind].append(f"{gap.layer}: {gap.detail}")
+    # In the log as well as on the console: this is the one finding a handover
+    # note needs, and the console scrolls away.
+    log.event("master.gaps", "; ".join(
+        f"{kind} on {len(entries)} layer(s): {', '.join(e.split(':')[0] for e in entries)}"
+        for kind, entries in by_kind.items()
+    ))
 
     console.print("\n[yellow]Not carried over by the copy, and not repaired:[/yellow]")
     for kind, entries in by_kind.items():
@@ -1341,6 +1347,10 @@ def _report_schema_gaps(template: Any, service: Any) -> None:
             console.print(f"    [dim]{entry}[/dim]")
         if len(entries) > 6:
             console.print(f"    [dim]... and {len(entries) - 6} more[/dim]")
+    if "contingent values" in by_kind:
+        console.print("  [yellow]The tool cannot write contingent values yet: add them "
+                      "by hand on the new master[/yellow], and tell whoever takes the "
+                      "project over.")
 
 
 def _destroy(slug: str, *, profile: str, yes: bool) -> None:

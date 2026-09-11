@@ -26,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Per-project run state. Git-ignored: it holds live AGOL item ids for real client
 # projects, and rollback needs it while version control does not.
 STATE_DIR = REPO_ROOT / "state"
-DEFAULT_MANIFEST = REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
+TEMPLATES_DIR = REPO_ROOT / "agol_provision" / "templates"
+DEFAULT_MANIFEST = TEMPLATES_DIR / "vsclr-standard.yaml"
 
 # Named so tests can substitute it. Stage 2 has to wait out an AGOL job that
 # the arcgis API starts and does not track; the waiting itself is covered by
@@ -38,16 +39,20 @@ def _manifest_for(slug: str, manifest_path: str | None) -> tuple[Path, str]:
     """Which manifest a slug command should use, and why -- for the console.
 
     An explicit `--manifest` wins. Otherwise the one the project's state says it
-    was provisioned from, so a second template set cannot be resumed or inspected
-    against the first set's manifest by a forgotten flag. A project with no state
-    yet gets the default, which is the only case where the flag matters.
+    was provisioned from -- by path, or by name in the templates directory for
+    state written before the path was kept -- so a second template set cannot
+    be resumed or inspected against the first set's manifest by a forgotten
+    flag. A project with no state yet gets the default, which is the only case
+    where the flag matters.
     """
     from agol_provision.state import StateError, recorded_manifest
 
     if manifest_path:
         return Path(manifest_path), "given"
     try:
-        recorded = recorded_manifest(STATE_DIR, slug, root=REPO_ROOT)
+        recorded = recorded_manifest(
+            STATE_DIR, slug, root=REPO_ROOT, templates_dir=TEMPLATES_DIR
+        )
     except StateError as exc:
         _fail(str(exc))
     if recorded is not None:
@@ -984,6 +989,9 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
         return
 
     state.complete_stage("preflight")
+    # State written before the manifest path was kept learns it here, so the
+    # next resume resolves by path rather than by name.
+    state.remember_manifest(_portable(path))
     _create_master(gis, manifest, ctx, state, log)
     state.complete_stage("master")
     _create_views(gis, manifest, ctx, state, log)

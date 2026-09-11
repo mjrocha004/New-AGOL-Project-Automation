@@ -785,6 +785,36 @@ class TestProvisionStage1:
         assert f"Manifest test v1 -- {manifest_file} (recorded for companya-moline)" in result.output
         assert "rechecking relationships and indexes" in result.output
 
+    def test_a_resume_from_state_written_before_paths_were_recorded_resolves_by_name(
+        self, monkeypatch, manifest_file, state_dir, registry, template, tmp_path
+    ):
+        """The DeWitt case: the state file knows the manifest's name only, and
+        the manifest sits in the templates directory under that name."""
+        import shutil
+
+        from click.testing import CliRunner
+
+        from agol_provision import auth, cli
+        from agol_provision.cli import main
+
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        raw = self.state(state_dir)
+        del raw["manifest_path"]
+        (state_dir / "companya-moline.json").write_text(json.dumps(raw))
+
+        templates = tmp_path / "templates"
+        templates.mkdir()
+        shutil.copy(manifest_file, templates / "test.yaml")
+        monkeypatch.setattr(cli, "TEMPLATES_DIR", templates)
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        result = CliRunner().invoke(main, [
+            "provision", "--company", "CompanyA", "--location", "Moline",
+        ])
+        assert result.exit_code == 0, result.output
+        assert f"{templates / 'test.yaml'} (recorded for companya-moline)" in result.output
+        # And the path is recorded now, so the next resume does not need the name.
+        assert self.state(state_dir)["manifest_path"] == str(templates / "test.yaml")
+
     def test_a_resume_under_a_different_manifest_is_refused(
         self, monkeypatch, manifest_file, state_dir, registry, template, tmp_path
     ):

@@ -199,9 +199,43 @@ class TestRecordedManifest:
         assert ProjectState.load(path).manifest_path is None
         assert recorded_manifest(state_dir, "testcompany-bettendorf") is None
 
+    def test_falls_back_to_the_manifest_name_when_no_path_was_recorded(self, state_dir, tmp_path):
+        """The DeWitt state predates the path field but knows the name, and
+        the manifest is where discover puts it. Refusing that resume with
+        'omit --manifest' -- which the user had -- was the bug this pins."""
+        from agol_provision.state import recorded_manifest
+
+        path = state_dir / "testcompany-dewitt.json"
+        path.write_text(json.dumps({
+            "state_version": 1, "slug": "testcompany-dewitt", "company": "TestCompany",
+            "location": "DeWitt", "manifest_name": "Kinetic-standard",
+            "manifest_version": 1, "stages_completed": [], "items": {},
+        }))
+        templates = tmp_path / "templates"
+        templates.mkdir()
+        assert recorded_manifest(state_dir, "testcompany-dewitt", templates_dir=templates) is None
+        (templates / "Kinetic-standard.yaml").write_text("name: Kinetic-standard\n")
+        assert recorded_manifest(state_dir, "testcompany-dewitt", templates_dir=templates) == (
+            templates / "Kinetic-standard.yaml"
+        )
+
+    def test_remember_manifest_backfills_the_path_once(self, state_dir, tmp_path):
+        state = self._create(state_dir, None)
+        state.record(_item("master", "aaa111"))
+        assert ProjectState.load(state.path).manifest_path is None
+
+        state.remember_manifest("agol_provision/templates/kinetic-standard.yaml")
+        assert ProjectState.load(state.path).manifest_path == (
+            "agol_provision/templates/kinetic-standard.yaml"
+        )
+        # Already recorded: nothing is rewritten.
+        before = state.path.stat().st_mtime_ns
+        state.remember_manifest("agol_provision/templates/kinetic-standard.yaml")
+        assert state.path.stat().st_mtime_ns == before
+
     def test_refuses_resume_under_a_different_manifest(self, state_dir, tmp_path):
         """Same version number, different template set: the half-built project
         would be finished against the wrong templates."""
         self._create(state_dir, tmp_path / "kinetic-standard.yaml").record(_item("master", "a"))
-        with pytest.raises(StateError, match="kinetic-standard.*vsclr-standard was requested"):
+        with pytest.raises(StateError, match="kinetic-standard.*vsclr-standard was requested.*--manifest for kinetic-standard"):
             self._create(state_dir, tmp_path / "vsclr-standard.yaml", name="vsclr-standard")

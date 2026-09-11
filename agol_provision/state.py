@@ -121,8 +121,9 @@ class ProjectState:
         if existing.manifest_name != manifest_name:
             raise StateError(
                 f"{path} was created with manifest {existing.manifest_name}, but "
-                f"{manifest_name} was requested. Omit --manifest to use the recorded "
-                f"one, or roll back the partial project (`--destroy {slug}`) first."
+                f"{manifest_name} was requested. Pass --manifest for "
+                f"{existing.manifest_name}, or roll back the partial project "
+                f"(`--destroy {slug}`) first."
             )
         if existing.manifest_version != manifest_version:
             raise StateError(
@@ -223,6 +224,16 @@ class ProjectState:
     def is_stage_complete(self, stage: str) -> bool:
         return stage in self.stages_completed
 
+    def remember_manifest(self, manifest_path: str) -> None:
+        """Record where the manifest is, for state written before that was kept.
+
+        Saved only when it changes; a resume that learns nothing writes nothing.
+        """
+        if self.manifest_path == manifest_path:
+            return
+        self.manifest_path = manifest_path
+        self.save()
+
     # ---------- rollback ----------
 
     def destroy_order(self) -> list[CreatedItem]:
@@ -246,21 +257,29 @@ class ProjectState:
         return {i.item_id for i in self.items.values()}
 
 
-def recorded_manifest(state_dir: Path, slug: str, *, root: Path | None = None) -> Path | None:
-    """The manifest a project was provisioned from, if its state says where.
+def recorded_manifest(
+    state_dir: Path, slug: str, *, root: Path | None = None, templates_dir: Path | None = None
+) -> Path | None:
+    """The manifest a project was provisioned from, if its state can say.
 
-    A relative recorded path is relative to `root` (the repo), which is how the
-    CLI records a manifest that lives in the repo. None when there is no state
-    for the slug, or the state predates the field; callers fall back to whatever
+    By recorded path first; a relative one is relative to `root` (the repo),
+    which is how the CLI records a manifest that lives there. State written
+    before the path was kept still knows the manifest's *name*, and `discover`
+    writes `<templates_dir>/<name>.yaml`, so that is tried next. None when there
+    is no state for the slug or neither resolves; callers fall back to whatever
     they defaulted to before rather than guess.
     """
     path = state_dir / f"{slug}.json"
     if not path.exists():
         return None
     state = ProjectState.load(path)
-    if not state.manifest_path:
-        return None
-    manifest = Path(state.manifest_path)
-    if not manifest.is_absolute() and root is not None:
-        manifest = root / manifest
-    return manifest
+    if state.manifest_path:
+        manifest = Path(state.manifest_path)
+        if not manifest.is_absolute() and root is not None:
+            manifest = root / manifest
+        return manifest
+    if templates_dir is not None:
+        by_name = templates_dir / f"{state.manifest_name}.yaml"
+        if by_name.exists():
+            return by_name
+    return None

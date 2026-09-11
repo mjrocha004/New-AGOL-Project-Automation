@@ -91,7 +91,11 @@ fails before any AGOL call rather than at stage 4 of a live run.
 
 **State records the manifest a project came from** — name, version, and path —
 and the two slug commands (`provision` resume, `inspect-indexes`) default to it
-and refuse a `--manifest` naming a different one. Every template-reading command
+and refuse a `--manifest` naming a different one. State written before the path
+was kept (Bettendorf, DeWitt) resolves by name in the templates directory, and a
+live run backfills the path; the first DeWitt resume after the change was
+refused with "omit `--manifest`" when the user already had, because that
+fallback was missing. Every template-reading command
 used to default to `vsclr-standard.yaml`, which was fine with one template set
 and a silent wrong answer with two: an `inspect-indexes` on a Kinetic project
 would have compared it against the Zayo template. `preview` and a first

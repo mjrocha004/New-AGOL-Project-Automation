@@ -89,6 +89,14 @@ walker. Adding or dropping an item for a client is a manifest edit. `manifest.py
 validates the cross-references (`consumes`, `share_to`) at load time so a typo
 fails before any AGOL call rather than at stage 4 of a live run.
 
+**State records the manifest a project came from** — name, version, and path —
+and the two slug commands (`provision` resume, `inspect-indexes`) default to it
+and refuse a `--manifest` naming a different one. Every template-reading command
+used to default to `vsclr-standard.yaml`, which was fine with one template set
+and a silent wrong answer with two: an `inspect-indexes` on a Kinetic project
+would have compared it against the Zayo template. `preview` and a first
+`provision` still need the flag; there is no state to consult yet.
+
 **Creation order is the dependency graph**, and rollback is its reverse:
 `master → views → groups → maps → apps → sharing`. `state.py` records items in
 creation order and derives `destroy_order()` by reversing what was *actually*
@@ -156,8 +164,17 @@ rather than an error:
   appeared afterwards. Poll by constructing a *new* collection each time.
 - **`create_view()` copies snippet, description and tags from the SOURCE service's
   item** when they are not passed -- and the source is the new master, so every
-  view silently inherited the master's blurb. Set them from the template view
-  afterwards.
+  view silently inherited the master's blurb. Summary and description are set
+  from the template view afterwards; tags are the project's, since the template
+  view's tags name the template's project.
+- **`updateItem` ignores an empty field unless `clearEmptyFields` is true.**
+  Setting a view's description to the template view's *blank* description is a
+  no-op without it, so all eight of the first Kinetic project's views kept the
+  master's provenance line after being "updated" -- and the tests did not catch
+  it because the fake `update` applied `""` verbatim. `_set_view_metadata`
+  passes `clearEmptyFields: True`, and the fake now mimics AGOL. `Item.update()`
+  has no dedicated argument for it; a key in `item_properties` reaches the
+  request as a form parameter.
 - **`create_view(query=...)` filters the FIRST LAYER ONLY.** Its
   `set_visible_fields_and_query()` helper resolves `flc.layers[0]` and updates
   that one layer, so on a view spanning 18 layers the other 17 are created
@@ -214,7 +231,10 @@ rather than an error:
   with `relatedTableId` remapped by layer name. The library's method also
   created the service *before* the post that failed and raised with that item
   lost inside the exception; ours creates, records, then posts, so a refused
-  post is in state for `--destroy`. The Zayo master has no relationships and
+  post is in state for `--destroy`. **Verified live 2026-09-11:** the spike on
+  Kinetic returned `USABLE WITH FIXUPS`, `Relationships: 2 applied`, both
+  present on the copy with name, role and `keyField` intact, and the only diffs
+  were the expected index warnings. The Zayo master has no relationships and
   never triggered any of this.
 - **The copy strips each layer's `indexes` before posting it** (as the library
   did), so a schema diff is *expected* to report index differences — that is
@@ -285,13 +305,6 @@ decisions in waiting, not defects.
 
 2. **Contingent values are reported, never repaired.** See Known gaps. The report
    exists so the loss is named; the writer does not exist at all in arcgis.
-
-3. **The relationship fixup has not yet run live.** The owned copy and
-   `reapply_relationships()` were built from the Kinetic probe result (only the
-   two relationship layers refused; accepted once `relationships` was removed)
-   and from what `clone_items` posts, but no run has yet completed against the
-   Kinetic master. The spike is the test: its diff rates a missing relationship
-   critical, so `USABLE WITH FIXUPS` with no relationship rows is the pass.
 
 ## Not in the manifest, on purpose
 

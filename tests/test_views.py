@@ -759,19 +759,53 @@ class TestProvisionStage2:
         assert result.exit_code == 1
         assert "Invalid URL (400)" in result.output
 
-    def test_copies_the_template_views_own_snippet_description_and_tags(
+    def test_copies_the_template_views_own_snippet_and_description(
         self, monkeypatch, manifest_file, state_dir, registry, templates
     ):
         """create_view() falls back to the SOURCE service's item for these.
 
         The source is the new master, so every view inherited the master's
-        description and tags instead of the template view's.
+        description instead of the template view's.
         """
         self.invoke(monkeypatch, manifest_file, state_dir, registry)
         view = self.created_views(registry)["CompanyA Moline (Read-Only)"]
         assert view.snippet == "Read-only access"
         assert view.description == "What the viewer group sees"
-        assert view.tags == ["viewer", "read-only"]
+
+    def test_tags_are_the_projects_not_the_template_views(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """The template view's tags name the template's project. The DeWitt
+        views arrived tagged for Kinetic; they should be tagged like their
+        master."""
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        view = self.created_views(registry)["CompanyA Moline (Read-Only)"]
+        assert view.tags == ["CompanyA", "Moline"]
+
+    def test_a_blank_template_view_gives_a_blank_view_not_the_masters_blurb(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """AGOL ignores an empty field in updateItem unless told to clear it,
+        so "set description to the template's" silently left the master's
+        provenance line on all eight DeWitt views."""
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        view = self.created_views(registry)["CompanyA Moline - QC View"]
+        assert view.description == ""
+        assert view.snippet == ""
+
+    def test_a_resume_reapplies_the_metadata_of_existing_views(
+        self, monkeypatch, manifest_file, state_dir, registry, templates
+    ):
+        """Service names are burned forever, so a wrong description cannot be
+        fixed by destroying and re-creating. Resume must repair it in place."""
+        self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        registry[UNIFORM_VIEW].description = "Edited on the template since"
+        result = self.invoke(monkeypatch, manifest_file, state_dir, registry)
+        assert result.exit_code == 0, result.output
+        view = self.created_views(registry)["CompanyA Moline (Read-Only)"]
+        assert view.description == "Edited on the template since"
+        assert view.tags == ["CompanyA", "Moline"]
+        assert "metadata rechecked" in result.output
 
     def test_the_log_records_the_whole_run_in_order(
         self, monkeypatch, manifest_file, state_dir, registry, templates

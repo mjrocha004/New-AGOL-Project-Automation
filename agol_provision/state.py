@@ -74,6 +74,10 @@ class ProjectState:
     manifest_name: str
     manifest_version: int
     path: Path
+    # Where the manifest was when the project was provisioned, so the slug
+    # commands can find it again without being told. None on state written
+    # before this was recorded.
+    manifest_path: str | None = None
     stages_completed: list[str] = field(default_factory=list)
     # Insertion-ordered: this ordering *is* the rollback plan.
     items: dict[str, CreatedItem] = field(default_factory=dict)
@@ -91,12 +95,15 @@ class ProjectState:
         location: str,
         manifest_name: str,
         manifest_version: int,
+        manifest_path: Path | str | None = None,
     ) -> ProjectState:
         """Resume an existing run, or start a new one.
 
-        Refuses to resume across a manifest version change: the half-built project
-        was assembled against different rules, and silently continuing would
-        produce a project matching neither version.
+        Refuses to resume under a different manifest, by name or by version: the
+        half-built project was assembled against different rules, and silently
+        continuing would produce a project matching neither. The name check is
+        what stops a second template set's resume being pointed at the first
+        set's manifest by a forgotten flag.
         """
         path = state_dir / f"{slug}.json"
         if not path.exists():
@@ -107,9 +114,16 @@ class ProjectState:
                 manifest_name=manifest_name,
                 manifest_version=manifest_version,
                 path=path,
+                manifest_path=str(manifest_path) if manifest_path else None,
             )
 
         existing = cls.load(path)
+        if existing.manifest_name != manifest_name:
+            raise StateError(
+                f"{path} was created with manifest {existing.manifest_name}, but "
+                f"{manifest_name} was requested. Omit --manifest to use the recorded "
+                f"one, or roll back the partial project (`--destroy {slug}`) first."
+            )
         if existing.manifest_version != manifest_version:
             raise StateError(
                 f"{path} was created with manifest {existing.manifest_name} "
@@ -148,6 +162,7 @@ class ProjectState:
             manifest_name=raw["manifest_name"],
             manifest_version=raw["manifest_version"],
             path=path,
+            manifest_path=raw.get("manifest_path"),
             stages_completed=list(raw.get("stages_completed", [])),
             items={k: CreatedItem(**v) for k, v in raw.get("items", {}).items()},
             started_at=raw.get("started_at", _utc_now()),
@@ -167,6 +182,7 @@ class ProjectState:
             "location": self.location,
             "manifest_name": self.manifest_name,
             "manifest_version": self.manifest_version,
+            "manifest_path": self.manifest_path,
             "started_at": self.started_at,
             "stages_completed": self.stages_completed,
             "items": {k: asdict(v) for k, v in self.items.items()},
@@ -228,3 +244,23 @@ class ProjectState:
     def item_ids(self) -> set[str]:
         """Every AGOL id this run created. Used by verify to assert no leakage."""
         return {i.item_id for i in self.items.values()}
+
+
+def recorded_manifest(state_dir: Path, slug: str, *, root: Path | None = None) -> Path | None:
+    """The manifest a project was provisioned from, if its state says where.
+
+    A relative recorded path is relative to `root` (the repo), which is how the
+    CLI records a manifest that lives in the repo. None when there is no state
+    for the slug, or the state predates the field; callers fall back to whatever
+    they defaulted to before rather than guess.
+    """
+    path = state_dir / f"{slug}.json"
+    if not path.exists():
+        return None
+    state = ProjectState.load(path)
+    if not state.manifest_path:
+        return None
+    manifest = Path(state.manifest_path)
+    if not manifest.is_absolute() and root is not None:
+        manifest = root / manifest
+    return manifest

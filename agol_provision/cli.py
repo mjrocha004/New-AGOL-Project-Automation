@@ -26,11 +26,42 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Per-project run state. Git-ignored: it holds live AGOL item ids for real client
 # projects, and rollback needs it while version control does not.
 STATE_DIR = REPO_ROOT / "state"
+DEFAULT_MANIFEST = REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
 
 # Named so tests can substitute it. Stage 2 has to wait out an AGOL job that
 # the arcgis API starts and does not track; the waiting itself is covered by
 # views.wait_for_layers' own tests.
 SLEEP = time.sleep
+
+
+def _manifest_for(slug: str, manifest_path: str | None) -> tuple[Path, str]:
+    """Which manifest a slug command should use, and why -- for the console.
+
+    An explicit `--manifest` wins. Otherwise the one the project's state says it
+    was provisioned from, so a second template set cannot be resumed or inspected
+    against the first set's manifest by a forgotten flag. A project with no state
+    yet gets the default, which is the only case where the flag matters.
+    """
+    from agol_provision.state import StateError, recorded_manifest
+
+    if manifest_path:
+        return Path(manifest_path), "given"
+    try:
+        recorded = recorded_manifest(STATE_DIR, slug, root=REPO_ROOT)
+    except StateError as exc:
+        _fail(str(exc))
+    if recorded is not None:
+        return recorded, f"recorded for {slug}"
+    return DEFAULT_MANIFEST, "default"
+
+
+def _portable(path: Path) -> str:
+    """A manifest path as state records it: repo-relative when it is in the repo,
+    so the state file means the same thing on another checkout."""
+    resolved = path.resolve()
+    if resolved.is_relative_to(REPO_ROOT):
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    return str(resolved)
 
 
 def _fail(message: str) -> None:
@@ -812,7 +843,8 @@ def spike_master(profile, master_id, keep, yes) -> None:
 @click.option("--company", default=None, help="Client company name, e.g. CompanyA.")
 @click.option("--location", default=None, help="Project location, e.g. Moline.")
 @click.option("--manifest", "manifest_path", type=click.Path(exists=True), default=None,
-              help="Manifest to provision from. Defaults to the generated vsclr-standard.yaml.")
+              help="Manifest to provision from. Defaults to the one this project's state "
+                   "records, or to vsclr-standard.yaml for a new project.")
 @click.option("--service-name-override", default=None, metavar="STEM",
               help="Replace the derived service-name stem, when the standard one is taken.")
 @click.option("--destroy", "destroy_slug", default=None, metavar="SLUG",
@@ -857,20 +889,20 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
         _fail("Both --company and --location are required, e.g. "
               "`--company CompanyA --location Moline`.")
 
-    path = Path(manifest_path) if manifest_path else (
-        REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
-    )
-    try:
-        manifest = load_manifest(path)
-    except ManifestError as exc:
-        _fail(str(exc))
-
     try:
         ctx = NameContext(
             company=company, location=location, service_name_override=service_name_override
         )
         slug = ctx.slug()
     except NamingError as exc:
+        _fail(str(exc))
+
+    # The slug comes before the manifest on purpose: a resume takes its manifest
+    # from the project's state unless told otherwise.
+    path, how = _manifest_for(slug, manifest_path)
+    try:
+        manifest = load_manifest(path)
+    except ManifestError as exc:
         _fail(str(exc))
 
     try:
@@ -884,6 +916,7 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
         state = ProjectState.load_or_create(
             state_dir=STATE_DIR, slug=slug, company=company, location=location,
             manifest_name=manifest.name, manifest_version=manifest.version,
+            manifest_path=_portable(path),
         )
     except StateError as exc:
         _fail(str(exc))
@@ -895,7 +928,8 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
 
     mode = "dry run, nothing will be written" if dry_run else "live run"
     console.print(f"Connected as [cyan]{describe(gis)}[/cyan]")
-    console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} -- {path}")
+    console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} -- {path}"
+                  + (f" ({how})" if how != "given" else ""))
     console.print(f"Project [cyan]{company} / {location}[/cyan]  ({slug}, {mode})\n")
 
     with log.step("preflight") as note:
@@ -962,6 +996,29 @@ def provision(company, location, manifest_path, service_name_override, destroy_s
     )
 
 
+def _set_view_metadata(view_item: Any, template: Any, ctx: Any, title: str) -> None:
+    """Title, summary, description and tags for a view -- and clear what should be blank.
+
+    `create_view()` copies snippet, description and tags from the *source*
+    service's item when they are not given, and the source is the new master,
+    so every view arrives carrying the master's blurb. Summary and description
+    come from the template view. Tags do not: the template view's tags name the
+    template's project, so the view is tagged like its master instead.
+
+    `clearEmptyFields` is what makes a blank template blurb *clear* the
+    inherited one. Without it AGOL's updateItem ignores an empty value, which
+    left the master's provenance line on all eight of the first Kinetic
+    project's views.
+    """
+    view_item.update(item_properties={
+        "title": title,
+        "snippet": getattr(template, "snippet", "") or "",
+        "description": getattr(template, "description", "") or "",
+        "tags": [ctx.company, ctx.location],
+        "clearEmptyFields": True,
+    })
+
+
 def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> None:
     """Stage 2: create each view natively from the new master and replay it."""
     from agol_provision.state import CreatedItem
@@ -983,11 +1040,21 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> No
     for spec in manifest.views:
         title = ctx.render_title(spec.title)
         service_name = ctx.render_service_name(spec.service_name)
+        template = gis.content.get(spec.template_item_id)
         if state.has(spec.key):
-            console.print(f"[dim]{service_name} already created; skipping.[/dim]")
+            # Resume doubles as repair here too. A wrong description or the
+            # template's tags cannot be fixed by destroying and re-creating --
+            # the service names are burned forever -- so put them right in place.
+            existing = state.get(spec.key)
+            already = gis.content.get(existing.item_id)
+            if already is None:
+                _fail(f"{existing.title} ({existing.item_id}) is recorded for this "
+                      f"project but is not in the org -- it was deleted by hand. Run "
+                      f"`provision --destroy {state.slug}` to clear the record.")
+            _set_view_metadata(already, template, ctx, title)
+            console.print(f"[dim]{service_name} already created; metadata rechecked.[/dim]")
             continue
 
-        template = gis.content.get(spec.template_item_id)
         # Read live rather than from the manifest, so editing a template view in
         # AGOL propagates to the next project with no manifest edit.
         plan = read_template_view(service_of(template))
@@ -1017,15 +1084,7 @@ def _create_views(gis: Any, manifest: Any, ctx: Any, state: Any, log: Any) -> No
             key=spec.key, item_id=new_item.itemid, item_type="Feature Service",
             title=title, service_name=service_name,
         ))
-        # create_view() copies snippet, description and tags from the *source*
-        # service's item when they are not given -- and the source is the new
-        # master, so without this every view carries the master's blurb.
-        new_item.update(item_properties={
-            "title": title,
-            "snippet": getattr(template, "snippet", "") or "",
-            "description": getattr(template, "description", "") or "",
-            "tags": list(getattr(template, "tags", []) or []),
-        })
+        _set_view_metadata(new_item, template, ctx, title)
 
         # AGOL adds a view's layers with an async job that create_view() does not
         # wait for, so the service can report nothing at all for several seconds.
@@ -1343,7 +1402,8 @@ def _destroy(slug: str, *, profile: str, yes: bool) -> None:
 @click.option("--slug", required=True, metavar="SLUG",
               help="Project slug, e.g. testcompany-silvis. Reads state/<slug>.json.")
 @click.option("--manifest", "manifest_path", type=click.Path(exists=True), default=None,
-              help="Manifest holding the template master id. Defaults to vsclr-standard.yaml.")
+              help="Manifest holding the template master id. Defaults to the one this "
+                   "project's state records.")
 @click.option("--layer", "focus", default=None, metavar="NAME",
               help="Show one layer in detail: the fields the classification used.")
 @click.option("--profile", default="home", show_default=True,
@@ -1373,17 +1433,23 @@ def inspect_indexes(slug, manifest_path, focus, profile) -> None:
     if not state_path.exists():
         _fail(f"No run state for {slug!r} at {state_path}. Provision the project first, "
               f"or check the slug.")
-    recorded = json.loads(state_path.read_text()).get("items", {}).get("master")
+    raw = json.loads(state_path.read_text())
+    recorded = raw.get("items", {}).get("master")
     if not recorded:
         _fail(f"{slug!r} has no master recorded. Nothing to inspect.")
 
-    path = Path(manifest_path) if manifest_path else (
-        REPO_ROOT / "agol_provision" / "templates" / "vsclr-standard.yaml"
-    )
+    path, how = _manifest_for(slug, manifest_path)
     try:
         manifest = load_manifest(path)
     except ManifestError as exc:
         _fail(str(exc))
+    if manifest.name != raw.get("manifest_name"):
+        # Against the wrong template every layer reads as unmatched -- or worse,
+        # the ones that share a name read as matched.
+        _fail(f"{slug!r} was provisioned from manifest {raw.get('manifest_name')}, not "
+              f"{manifest.name}. Omit --manifest to use the recorded one.")
+    console.print(f"Manifest [cyan]{manifest.name}[/cyan] v{manifest.version} -- {path}"
+                  + (f" ({how})" if how != "given" else ""))
 
     try:
         gis = connect(profile)

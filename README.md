@@ -185,8 +185,13 @@ python -m agol_provision.cli discover --ids ids.txt
 | `docs/discovery-report-<name>.md` | Findings to read before building. |
 
 `<name>` is `--name`, default `vsclr-standard`. A second template set gets its own
-name so its manifest and report sit alongside the first instead of replacing it,
-and every later command then needs `--manifest agol_provision/templates/<name>.yaml`:
+name so its manifest and report sit alongside the first instead of replacing it.
+`preview` and a project's *first* `provision` then need
+`--manifest agol_provision/templates/<name>.yaml`; after that the project's state
+records which manifest it came from, and `provision` (to resume or repair) and
+`inspect-indexes` default to it — and refuse a `--manifest` that names a
+different one, so a forgotten flag cannot point a second template set's project
+at the first set's templates.
 
 ```bat
 python -m agol_provision.cli discover --ids ids-companyA.txt --name companyA-standard
@@ -416,10 +421,13 @@ fixable in place rather than by rolling back and picking a new name.
 python -m agol_provision.cli inspect-indexes --slug companya-moline
 ```
 
-Read-only. Lists every index the tool classifies as user-defined and whether the
-copy has it, so the spec's verification step — `build_status_Index` on all nine
-redline layers — is a command rather than a click-through in the AGOL UI. Run it
-after provisioning, and first whenever an index fails to reapply.
+Read-only, and live: it reads the template's and the copy's layers from AGOL
+right then, nothing from a generated file. Lists every index the tool classifies
+as user-defined and whether the copy has it, so the spec's verification step —
+`build_status_Index` on all nine redline layers — is a command rather than a
+click-through in the AGOL UI. Run it after provisioning, and first whenever an
+index fails to reapply. The template comes from the manifest the project's state
+recorded; `--manifest` is only for a state file written before that was recorded.
 
 Classification is by fields, so `--layer NAME` prints the fields the decision was
 made from: which the layer treats as system, which it exposes at all, every index
@@ -479,9 +487,14 @@ the layers or returns AGOL's reason for refusing.
 filter is unfiltered, not slightly wrong, and these get shared to subcontractors.
 The view is recorded in state first, so `--destroy` removes it.
 
-Each view's summary, description and tags are copied from the **template view**.
-Left alone, `create_view()` fills them in from the source service's item — which
-is the new master, so every view would carry the master's blurb.
+Each view's summary and description are copied from the **template view** —
+blank stays blank — and its tags are the project's (`COMPANY`, `LOCATION`), the
+same as the master's, because the template view's tags name the template's
+project. Left alone, `create_view()` fills all three in from the source
+service's item, which is the new master, so every view would carry the master's
+blurb. Re-running `provision` for a project rechecks this on every existing
+view, so a wrong description is fixed in place rather than by destroying and
+re-creating — the service names are burned forever.
 
 No `visible_fields` handling exists. Field visibility is uniform across all seven
 template views and none hides a field, so that path is not built on spec. If a

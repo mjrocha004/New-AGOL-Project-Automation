@@ -466,12 +466,19 @@ class FakeService:
         return f"{len(self._registry):032x}"
 
     def update(self, item_properties=None, **kwargs):
-        props = item_properties or kwargs
+        """AGOL's updateItem: an empty value is *ignored* unless the request
+        carries clearEmptyFields -- which is how every view kept the master's
+        description after being "updated" to a blank one."""
+        props = dict(item_properties or kwargs)
         self.updates.append(props)
-        self.title = props.get("title", self.title)
-        self.snippet = props.get("snippet", self.snippet)
-        self.description = props.get("description", self.description)
-        self.tags = props.get("tags", self.tags)
+        clear = bool(props.pop("clearEmptyFields", False))
+        for attr in ("title", "snippet", "description", "tags"):
+            if attr not in props:
+                continue
+            value = props[attr]
+            if value in ("", [], None) and not clear:
+                continue
+            setattr(self, attr, value)
         return True
 
     def delete(self):
@@ -535,10 +542,14 @@ class FakeServiceManager:
         self.create_view_calls.append(kwargs)
         names = [lyr.properties["name"] for lyr in kwargs.get("view_layers") or []]
         ids = [lyr.properties["id"] for lyr in kwargs.get("view_layers") or []]
+        # create_view() copies snippet, description and tags from the SOURCE
+        # service's item when they are not passed -- and the source is the master.
         view = FakeService(
             self.service._next_id, kwargs["name"], layer_names=names,
             registry=self.service._registry, layer_ids=ids,
             typeKeywords=["View Service"],
+            snippet=self.service.snippet, description=self.service.description,
+            tags=list(self.service.tags),
         )
         return view
 
@@ -751,6 +762,43 @@ class TestProvisionStage1:
         self.invoke(monkeypatch, manifest_file, state_dir, gis)
         self.invoke(monkeypatch, manifest_file, state_dir, gis)
         assert len(gis.content.created) == 1
+
+    def test_a_resume_finds_the_recorded_manifest_without_being_told(
+        self, monkeypatch, manifest_file, state_dir, registry, template
+    ):
+        """The second template set made a forgotten --manifest point a resume
+        at the wrong templates. State records which manifest a project came
+        from, and a resume uses it."""
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        assert self.state(state_dir)["manifest_path"] == str(manifest_file)
+
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        result = CliRunner().invoke(main, [
+            "provision", "--company", "CompanyA", "--location", "Moline",
+        ])
+        assert result.exit_code == 0, result.output
+        assert f"Manifest test v1 -- {manifest_file} (recorded for companya-moline)" in result.output
+        assert "rechecking relationships and indexes" in result.output
+
+    def test_a_resume_under_a_different_manifest_is_refused(
+        self, monkeypatch, manifest_file, state_dir, registry, template, tmp_path
+    ):
+        import yaml
+
+        self.invoke(monkeypatch, manifest_file, state_dir, FakeGIS(registry))
+        other = tmp_path / "other.yaml"
+        other.write_text(yaml.safe_dump(dict(
+            yaml.safe_load(manifest_file.read_text()), name="other")))
+        result = self.invoke(monkeypatch, other, state_dir, FakeGIS(registry))
+        assert result.exit_code == 1
+        flat = " ".join(result.output.split())
+        assert "created with manifest test, but other was requested" in flat
+        assert len(self.state(state_dir)["items"]) == 2  # nothing was touched
 
     def test_a_resume_reattempts_the_indexes_on_the_existing_master(
         self, monkeypatch, manifest_file, state_dir, registry, template
@@ -1039,6 +1087,41 @@ class TestInspectIndexes:
         from agol_provision.cli import main
 
         assert "inspect-indexes" in main.commands
+
+    def test_uses_the_recorded_manifest_when_none_is_given(
+        self, monkeypatch, manifest_file, org, state_dir
+    ):
+        from click.testing import CliRunner
+
+        from agol_provision import auth
+        from agol_provision.cli import main
+        from agol_provision.state import ProjectState
+
+        registry, _ = org
+        state = ProjectState.load(state_dir / "testcompany-silvis.json")
+        state.manifest_path = str(manifest_file)
+        state.save()
+
+        monkeypatch.setattr(auth, "connect", lambda profile: FakeGIS(registry))
+        result = CliRunner().invoke(main, ["inspect-indexes", "--slug", "testcompany-silvis"])
+        assert result.exit_code == 0, result.output
+        assert "build_status_Index" in result.output
+        assert f"{manifest_file} (recorded for testcompany-silvis)" in result.output
+
+    def test_refuses_a_manifest_that_is_not_the_projects(
+        self, monkeypatch, manifest_file, org, tmp_path
+    ):
+        """Comparing a Kinetic copy against the Zayo template would report
+        every layer as unmatched, or worse, match the ones that share names."""
+        import yaml
+
+        registry, _ = org
+        other = tmp_path / "other.yaml"
+        other.write_text(yaml.safe_dump(dict(
+            yaml.safe_load(manifest_file.read_text()), name="other")))
+        result = self.invoke(monkeypatch, other, registry)
+        assert result.exit_code == 1
+        assert "provisioned from manifest test, not other" in result.output
 
     def test_lists_what_the_classifier_keeps_and_drops_the_rest(
         self, monkeypatch, manifest_file, org

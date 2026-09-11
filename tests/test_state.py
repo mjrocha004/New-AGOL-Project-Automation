@@ -153,3 +153,55 @@ class TestRollback:
         fresh.record(_item("master", "aaa111"))
         fresh.record(_item("view", "bbb222"))
         assert fresh.item_ids() == {"aaa111", "bbb222"}
+
+
+class TestRecordedManifest:
+    """Every slug command defaulted to vsclr-standard.yaml, so a second template
+    set (Kinetic) made `--manifest` a flag that silently pointed a resume or an
+    inspection at the wrong template when forgotten. State already knew the
+    manifest's name; now it records where it was, and hands it back."""
+
+    def _create(self, state_dir, manifest_path, name="kinetic-standard"):
+        return ProjectState.load_or_create(
+            state_dir=state_dir, slug="testcompany-dewitt", company="TestCompany",
+            location="DeWitt", manifest_name=name, manifest_version=1,
+            manifest_path=manifest_path,
+        )
+
+    def test_round_trips_the_manifest_path(self, state_dir, tmp_path):
+        manifest = tmp_path / "templates" / "kinetic-standard.yaml"
+        state = self._create(state_dir, manifest)
+        state.record(_item("master", "aaa111"))
+        assert ProjectState.load(state.path).manifest_path == str(manifest)
+
+    def test_recorded_manifest_returns_the_path_for_a_slug(self, state_dir, tmp_path):
+        from agol_provision.state import recorded_manifest
+
+        manifest = tmp_path / "templates" / "kinetic-standard.yaml"
+        self._create(state_dir, manifest).record(_item("master", "aaa111"))
+        assert recorded_manifest(state_dir, "testcompany-dewitt") == manifest
+
+    def test_recorded_manifest_is_none_without_state(self, state_dir):
+        from agol_provision.state import recorded_manifest
+
+        assert recorded_manifest(state_dir, "nobody-nowhere") is None
+
+    def test_a_state_written_before_paths_were_recorded_still_loads(self, state_dir):
+        """The Bettendorf state file predates this field."""
+        from agol_provision.state import recorded_manifest
+
+        path = state_dir / "testcompany-bettendorf.json"
+        path.write_text(json.dumps({
+            "state_version": 1, "slug": "testcompany-bettendorf", "company": "TestCompany",
+            "location": "Bettendorf", "manifest_name": "vsclr-standard",
+            "manifest_version": 1, "stages_completed": [], "items": {},
+        }))
+        assert ProjectState.load(path).manifest_path is None
+        assert recorded_manifest(state_dir, "testcompany-bettendorf") is None
+
+    def test_refuses_resume_under_a_different_manifest(self, state_dir, tmp_path):
+        """Same version number, different template set: the half-built project
+        would be finished against the wrong templates."""
+        self._create(state_dir, tmp_path / "kinetic-standard.yaml").record(_item("master", "a"))
+        with pytest.raises(StateError, match="kinetic-standard.*vsclr-standard was requested"):
+            self._create(state_dir, tmp_path / "vsclr-standard.yaml", name="vsclr-standard")
